@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools >= 64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fastsasa"
+version = "0.1.0"
+description = "Fast Shrake-Rupley solvent accessible surface areas of molecules and their beads over MD trajectories"
+readme = {file = "README.md", content-type = "text/markdown; charset=UTF-8"}
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    {name = "Thilo Duve"},
+]
+keywords = ["SASA", "solvent accessible surface area", "Shrake-Rupley", "molecular dynamics", "Martini", "coarse grained"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+requires-python = ">= 3.11"
+dependencies = [
+    "numpy",
+    "scipy",
+    "numba",
+    "MDAnalysis",
+]
+
+[dependency-groups]
+tests = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
