@@ -158,7 +158,7 @@ def surface_dots(xyz: ArrayLike, radii: ArrayLike, probe: float = PROBE_RADIUS,
 		(n_atoms, 3) coordinates of the atoms
 	radii : np.ndarray
 		(n_atoms,) van der Waals radii of the atoms, same unit as ``xyz``. 
-		Particles with radius 0 (e.g. dummy beads) are ignored in the calculation.
+		Atoms with radius 0 (e.g. dummy beads) are ignored in the calculation.
 	probe : float
 		probe radius, in the units of ``xyz`` (default in nm)
 	ndots : int
@@ -169,18 +169,21 @@ def surface_dots(xyz: ArrayLike, radii: ArrayLike, probe: float = PROBE_RADIUS,
 	dots : np.ndarray
 		(n_dots, 3) dot positions
 	owners : np.ndarray
-		(n_dots,) index of the particle each dot belongs to
+		(n_dots,) index of the atom each dot belongs to
 	area : float
 		solvent accessible surface area estimated from the dots (units of ``xyz`` squared)
 	"""
+	# convert to arrays and remove dummy beads (radius=0)
 	xyz = np.asarray(xyz, dtype=float)
 	radii = np.asarray(radii, dtype=float)
 	unit = unit_dots(int(ndots)) # generate unit sphere dots as template for all spheres
 	active = np.flatnonzero(radii > 0) # remove dummy beads (radius=0)
 	centres = xyz[active]
+
+	# compute the exposed dots and the SASA from them
 	expanded = radii[active] + probe
 	exposed = _exposed_dots(centres, expanded, np.zeros(len(active), dtype=int), unit)
 	area = float(np.sum(exposed.mean(axis=1) * 4 * np.pi * expanded**2))
 	dots = (centres[:, None, :] + expanded[:, None, None] * unit[None])[exposed] # coordinates of dots
-	owners = active[np.nonzero(exposed)[0]] # index of the particle each dot belongs to
+	owners = active[np.nonzero(exposed)[0]] # index of the atom each dot belongs to
 	return dots, owners, area

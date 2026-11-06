@@ -49,7 +49,7 @@ def _element_guesser():
 
 def atom_symbols(ag: mda.AtomGroup, cg: bool = False) -> list[str]:
 	'''
-	Symbols used to look up the radius of each particle
+	Symbols used to look up the radius of each atom
 	- AA: respective element. If the topology has no elements (e.g. gro, pdb without element column), 
 		  they are guessed from the atom names with the MDAnalysis guesser ('CLA' -> 'Cl', 'SOD' -> 'Na'),
 	 	  without changing ``ag``.
@@ -65,7 +65,7 @@ def atom_symbols(ag: mda.AtomGroup, cg: bool = False) -> list[str]:
 
 def atom_radii(ag: mda.AtomGroup, cg: bool = False, table: Mapping[str, float] | None = None) -> np.ndarray:
 	'''
-	Van der Waals radii (nm) of the particles in ``ag``, as used for the SASA.
+	Van der Waals radii (nm) of the atoms in ``ag``, as used for the SASA.
 
 	Parameters
 	----------
@@ -74,12 +74,12 @@ def atom_radii(ag: mda.AtomGroup, cg: bool = False, table: Mapping[str, float] |
 		use the CG bead radii (keys T, S, R, U) instead of the atomistic ones (element symbols)
 	table : mapping of str to float, optional
 		radii (nm) by symbol (see :func:`atom_symbols`) that add to or replace the default
-		radii (keys are case-insensitive), e.g. ``{'Na': 0.227, 'C': 0.170}``; a radius of 0 excludes a particle from the SASA calculation
+		radii (keys are case-insensitive), e.g. ``{'Na': 0.227, 'C': 0.170}``; a radius of 0 excludes an atom from the SASA calculation
 
 	Returns
 	-------
 	np.ndarray
-		(n_atoms,) radii of the particles in ``ag``, in the same order
+		(n_atoms,) radii of the atoms in ``ag``, in the same order
 	'''
 	# define radii table: default radii + user-specified radii
 	defaults = CG_RADII if cg else AA_RADII
