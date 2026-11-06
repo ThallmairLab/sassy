@@ -51,6 +51,16 @@ class SASA:
 	>>> sasa = SASA(universe.select_atoms('moltype GSH'))
 	>>> series = sasa.run()  # (n_molecules, n_frames), nm^2
 	>>> per_atom = sasa.run(per_atom=True)  # (n_atoms, n_frames), nm^2
+	>>> sasa.get_sasa('name S*')  # (n_frames,) SASA of the selection over time
+	>>> sasa.get_molecule_sasa(3)  # (n_frames,) SASA of molecule 3 over time
+
+	Attributes
+	----------
+	sasa : np.ndarray
+		(n_atoms, n_frames) SASA (nm^2) of every atom of ``ag`` from the last :meth:`run`
+		(None before), atoms in the order of ``ag``
+	frames, times : np.ndarray
+		(n_frames,) frame numbers and times (ps) of the last :meth:`run`
 	"""
 	def __init__(self, ag: mda.AtomGroup, cg: bool = False, probe: float = PROBE_RADIUS, ndots: int = N_DOTS,
 	             radii: ArrayLike | Mapping[str, float] | None = None, max_frame_atoms: int = 20000,
@@ -85,8 +95,16 @@ class SASA:
 		anchor[self._molecules[first]] = first
 		self._anchor = anchor[self._molecules]
 
-		# parallelization 
+		# parallelization
 		self._frames_per_block = max(1, max_frame_atoms // max(1, len(active)))
+
+		# results of run(), see get_sasa / get_molecule_sasa
+		self._lookup = np.full(ag.universe.atoms.n_atoms, -1, dtype=np.int64) # universe index -> position in ag
+		self._lookup[ag.indices] = np.arange(ag.n_atoms)
+		self.sasa = None # (n_atoms, n_frames) SASA (nm^2) of every atom of ag
+		self.frames = None # (n_frames,) frame numbers
+		self.times = None # (n_frames,) times (ps)
+		self._molecule_sasa = None
 
 	def _atom_areas(self, xyz: np.ndarray) -> np.ndarray:
 		"""
@@ -117,14 +135,20 @@ class SASA:
 		areas = exposed.reshape(n_frames, n_atoms) * self._dot_area
 		return areas
 
-	def _atom_blocks(self, start: int | None, stop: int | None, step: int | None) -> Iterator[np.ndarray]:
-		"""Claculate the atom SASA, (n_frames, n_atoms), of blocks of frames of ``start:stop:step``."""
+	def _atom_blocks(self, start: int | None, stop: int | None, step: int | None,
+	                 times: list | None = None) -> Iterator[np.ndarray]:
+		"""
+		Calculate the atom SASA, (n_frames, n_atoms), of blocks of frames of ``start:stop:step``;
+		the time of every frame is appended to ``times``.
+		"""
 		trajectory = self.ag.universe.trajectory
 		current = trajectory.ts.frame
 		buffer = []
 		try:
 			for ts in trajectory[start:stop:step]:
 				buffer.append(ts.positions[self._indices]) # save positions
+				if times is not None:
+					times.append(ts.time)
 				if len(buffer) == self._frames_per_block: 
 					yield self._atom_areas(np.array(buffer, dtype=np.float64)) # run SASA calculation
 					buffer = []
@@ -143,23 +167,29 @@ class SASA:
 
 
 	def run(self, start: int | None = None, stop: int | None = None, step: int | None = None,
-	        per_atom: bool = False, verbose: bool = False) -> np.ndarray:
+	        per_atom: bool = False, verbose: bool = False, name: str = "") -> np.ndarray:
 		"""
 		SASA (nm^2) of every molecule, or of every atom, in the frames ``start:stop:step``
 		of the trajectory.
+
+		The SASA of every atom is stored in :attr:`sasa` (with :attr:`frames` and
+		:attr:`times`), so that afterwards the SASA of any selection or molecule can
+		be taken with :meth:`get_sasa` and :meth:`get_molecule_sasa`. A new run
+		replaces the stored results.
 
 		Parameters
 		----------
 		start, stop, step : int, optional
 			frames of the trajectory, as in ``trajectory[start:stop:step]``
 		per_atom : bool
-			return the SASA of every atom instead of every molecule; it is computed
-			anyway, so this costs no extra time, only memory for the larger result.
+			return the SASA of every atom instead of every molecule.
 			The SASA of an atom is that within its own molecule, so the atoms of a
 			molecule sum to its SASA.
 		verbose : bool
 			show a progress bar over the frames. It advances once per block of frames
 			(see ``max_frame_atoms``), so it costs no measurable time but moves in steps.
+		name : str
+			label of the progress bar
 
 		Returns
 		-------
@@ -168,19 +198,113 @@ class SASA:
 			with ``per_atom`` (n_atoms, n_frames), atoms in the order of ``ag``; atoms with
 			radius 0 have SASA 0
 		"""
-		n_frames = len(self.ag.universe.trajectory[start:stop:step])
-		result = np.zeros((self.ag.n_atoms if per_atom else self.n_molecules, n_frames))
-		if not len(self._indices) or not n_frames: # only atoms without radius / no frames
-			return result
-		done = 0
-		with ProgressBar(total=n_frames, disable=not verbose, desc="SASA", unit="frame") as bar:
-			for areas in self._atom_blocks(start, stop, step):
-				frames = slice(done, done + len(areas))
-				if per_atom:
-					result[self._active, frames] = areas.T
-				else:
-					result[:, frames] = self._molecule_areas(areas).T
-				done += len(areas)
-				bar.update(len(areas))
-		return result
+		trajectory = self.ag.universe.trajectory
+		self.frames = np.arange(trajectory.n_frames)[start:stop:step]
+		n_frames = len(self.frames)
+		self.sasa = np.zeros((self.ag.n_atoms, n_frames))
+		self._molecule_sasa = np.zeros((self.n_molecules, n_frames))
+		times = []
+		if len(self._indices) and n_frames: # else only atoms without radius / no frames
+			done = 0
+			with ProgressBar(total=n_frames, disable=not verbose, desc=f"SASA calculation {name}", unit="frame") as bar:
+				for areas in self._atom_blocks(start, stop, step, times):
+					frames = slice(done, done + len(areas))
+					self.sasa[self._active, frames] = areas.T
+					self._molecule_sasa[:, frames] = self._molecule_areas(areas).T
+					done += len(areas)
+					bar.update(len(areas))
+		else:
+			current = trajectory.ts.frame
+			times = [ts.time for ts in trajectory[start:stop:step]]
+			trajectory[current]
+		self.times = np.array(times, dtype=float)
+		return self.sasa if per_atom else self._molecule_sasa
+
+	def _positions(self, selection: str | mda.AtomGroup | None) -> np.ndarray:
+		"""Positions in ``ag`` of the atoms of a selection string (applied to ``ag``) or an AtomGroup."""
+		if selection is None:
+			return np.arange(self.ag.n_atoms)
+		if isinstance(selection, str):
+			selection = self.ag.select_atoms(selection)
+		elif isinstance(selection, mda.core.groups.Atom):
+			selection = selection.universe.atoms[[selection.index]]
+		elif hasattr(selection, 'atoms'): # AtomGroup, Residue(Group), Segment(Group)
+			selection = selection.atoms
+		else:
+			raise TypeError(f"selection must be a selection string or an AtomGroup, got {type(selection).__name__}.")
+		if selection.universe is not self.ag.universe:
+			raise ValueError("The selection belongs to a different Universe than the AtomGroup of SASA.")
+		positions = self._lookup[selection.indices]
+		if (positions < 0).any():
+			missing = selection.indices[positions < 0]
+			raise ValueError(f"{len(missing)} atom(s) of the selection are not in the AtomGroup of SASA: "
+			                 f"universe indices {missing[:10].tolist()}{' ...' if len(missing) > 10 else ''}.")
+		return positions
+
+	def _check_run(self) -> None:
+		if self.sasa is None:
+			raise RuntimeError("No SASA computed yet: call run() first.")
+
+	def get_sasa(self, selection: str | mda.AtomGroup | None = None, per_atom: bool = False) -> np.ndarray:
+		"""
+		SASA (nm^2) over time of a selection of the atoms of ``ag``, from the last :meth:`run`.
+
+		The SASA of every atom is that within its own (whole) molecule, so the SASA
+		of a selection is the part of the molecules' surface that belongs to its
+		atoms, not the SASA of the selected atoms on their own.
+
+		Parameters
+		----------
+		selection : str or MDAnalysis.AtomGroup, optional
+			selection string, applied to ``ag`` (e.g. ``'name C*'``, ``'resid 1'``), or an
+			AtomGroup whose atoms are all in ``ag``; default all atoms of ``ag``
+		per_atom : bool
+			return the SASA of every selected atom instead of their sum
+
+		Returns
+		-------
+		np.ndarray
+			(n_frames,) summed SASA, or with ``per_atom`` (n_selected, n_frames), atoms
+			in the order of the selection
+
+		Examples
+		--------
+		>>> sasa.run()
+		>>> sasa.get_sasa('name S*')         # SASA of the sulfur atoms over time
+		>>> sasa.get_sasa(u.select_atoms('resname GLY'), per_atom=True)
+		"""
+		self._check_run()
+		atoms = self.sasa[self._positions(selection)]
+		return atoms if per_atom else atoms.sum(axis=0)
+
+	def get_molecule_sasa(self, index: int | ArrayLike | None = None) -> np.ndarray:
+		"""
+		SASA (nm^2) over time of molecules, by molecule index (0, 1, ... in the order
+		of :func:`split_molecules`), from the last :meth:`run`.
+
+		Parameters
+		----------
+		index : int or array-like of int, optional
+			molecule index or indices (negative indices count from the end);
+			default all molecules
+
+		Returns
+		-------
+		np.ndarray
+			(n_frames,) for a single index, else (n_indices, n_frames)
+
+		Examples
+		--------
+		>>> sasa.get_molecule_sasa(0)         # first molecule
+		>>> sasa.get_molecule_sasa([0, 2])    # first and third molecule
+		"""
+		self._check_run()
+		if index is None:
+			return self._molecule_sasa
+		index = np.asarray(index)
+		if not np.issubdtype(index.dtype, np.integer):
+			raise TypeError(f"Molecule indices must be integers, got {index.dtype}.")
+		if ((index < -self.n_molecules) | (index >= self.n_molecules)).any():
+			raise IndexError(f"Molecule index out of range for {self.n_molecules} molecule(s): {index.tolist()}.")
+		return self._molecule_sasa[index]
 
