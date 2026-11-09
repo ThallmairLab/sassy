@@ -3,6 +3,8 @@ SASA of every molecule, or of every atom, of an MDAnalysis AtomGroup over a
 trajectory.
 """
 from collections.abc import Iterator, Mapping
+import logging
+import time
 import numpy as np
 from numpy.typing import ArrayLike
 import MDAnalysis as mda
@@ -12,6 +14,8 @@ from .dots import unit_dots
 from .engine import _exposed_dots
 from .groups import molecule_index
 from .radii import PROBE_RADIUS, atom_radii
+
+logger = logging.getLogger(__name__)
 
 N_DOTS = 4800 # default minimum number of dots per atom (-> 4842 dots)
 
@@ -26,7 +30,8 @@ class SASA:
 
 	Every molecule (by molnum, or without molnums by detecting consecutive copies,
 	see :func:`molecule_index`) is taken on its own, so other molecules do not
-	bury its surface. Atoms with radius 0 (dummy beads, virtual sites) are
+	bury its surface. With ``per_molecule=False`` the whole AtomGroup is taken as
+	one body instead: all its atoms bury each other. Atoms with radius 0 (dummy beads, virtual sites) are
 	ignored. Molecules are assumed to be whole.
 
 	Parameters
@@ -45,6 +50,9 @@ class SASA:
 		adds to or replaces the default radii, e.g. ``{'Na': 0.227}``
 	max_frame_atoms : int
 		number of atoms (summed over frames) computed together in one parallel call
+	per_molecule : bool
+		take every molecule on its own (default); False takes the whole AtomGroup as one
+		molecule, so that molecules bury each other
 
 	Examples
 	--------
@@ -64,7 +72,7 @@ class SASA:
 	"""
 	def __init__(self, ag: mda.AtomGroup, cg: bool = False, probe: float = PROBE_RADIUS, ndots: int = N_DOTS,
 	             radii: ArrayLike | Mapping[str, float] | None = None, max_frame_atoms: int = 20000,
-	             ) -> None:
+	             per_molecule: bool = True) -> None:
 		
 		# prepare radii
 		if radii is None or isinstance(radii, Mapping):
@@ -76,7 +84,8 @@ class SASA:
 
 		# prepare atoms/molecules
 		self.ag = ag
-		molecules = molecule_index(ag) # molecule index of atoms
+		# molecule index of atoms; one molecule for the whole AtomGroup without per_molecule
+		molecules = molecule_index(ag) if per_molecule else np.zeros(ag.n_atoms, dtype=int)
 		self.n_molecules = int(molecules.max()) + 1 if len(molecules) else 0
 		active = np.flatnonzero(radii > 0) # select only atoms with a radius
 		self._active = active # positions in ag of the atoms with a radius
@@ -105,6 +114,10 @@ class SASA:
 		self.frames = None # (n_frames,) frame numbers
 		self.times = None # (n_frames,) times (ps)
 		self._molecule_sasa = None
+		logger.debug("%d atoms (%d with a radius) in %d %s; %d dots per atom, probe %.3f nm; "
+		             "%d frame(s) per parallel call", ag.n_atoms, len(active), self.n_molecules,
+		             'molecule(s)' if per_molecule else 'body (whole AtomGroup)', len(self.unit), probe,
+		             self._frames_per_block)
 
 	def _atom_areas(self, xyz: np.ndarray) -> np.ndarray:
 		"""
@@ -204,6 +217,7 @@ class SASA:
 		self.sasa = np.zeros((self.ag.n_atoms, n_frames))
 		self._molecule_sasa = np.zeros((self.n_molecules, n_frames))
 		times = []
+		tic = time.perf_counter()
 		if len(self._indices) and n_frames: # else only atoms without radius / no frames
 			done = 0
 			with ProgressBar(total=n_frames, disable=not verbose, desc=f"SASA calculation {name}", unit="frame") as bar:
@@ -218,6 +232,9 @@ class SASA:
 			times = [ts.time for ts in trajectory[start:stop:step]]
 			trajectory[current]
 		self.times = np.array(times, dtype=float)
+		elapsed = time.perf_counter() - tic
+		logger.debug("SASA of %d frame(s) in %.2f s (%.1f frames/s)", n_frames, elapsed,
+		             n_frames / elapsed if elapsed > 0 else float('inf'))
 		return self.sasa if per_atom else self._molecule_sasa
 
 	def _positions(self, selection: str | mda.AtomGroup | None) -> np.ndarray:

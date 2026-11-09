@@ -18,7 +18,7 @@ atomistic systems, a bead in coarse-grained ones.
 """
 from .dots import unit_dots, ico_dot_arc, ico_dot_dod
 from .engine import surface_dots
-from .groups import copy_length, molecule_index, split_molecules
+from .groups import copy_length, molecule_index, n_molecule_types, split_molecules
 from .radii import AA_RADII, CG_RADII, PROBE_RADIUS, atom_radii, atom_symbols
 from .sasa import N_DOTS, SASA
 
@@ -27,6 +27,6 @@ __version__ = "0.1.0"
 __all__ = [
 	"SASA", "N_DOTS", "surface_dots",
 	"unit_dots", "ico_dot_arc", "ico_dot_dod",
-	"copy_length", "molecule_index", "split_molecules",
+	"copy_length", "molecule_index", "n_molecule_types", "split_molecules",
 	"AA_RADII", "CG_RADII", "PROBE_RADIUS", "atom_radii", "atom_symbols",
 ]

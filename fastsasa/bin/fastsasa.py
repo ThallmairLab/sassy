@@ -2,9 +2,10 @@
 Command line interface: SASA of the molecules, atoms or selections of a
 trajectory, written as an xvg (text) or npz file.
 
-	fastsasa -s topol.tpr -f traj.xtc select 'moltype GSH' -o sasa.xvg
+	fastsasa -s topol.tpr -f traj.xtc -select 'moltype GSH' -o sasa.xvg
 """
 import argparse
+import logging
 import shlex
 import sys
 from collections.abc import Sequence
@@ -12,8 +13,40 @@ from pathlib import Path
 import numpy as np
 
 from .. import __version__
+from ..groups import n_molecule_types, split_molecules
 from ..radii import PROBE_RADIUS
 from ..sasa import N_DOTS, SASA
+
+logger = logging.getLogger('fastsasa')
+
+
+class _Formatter(logging.Formatter):
+	"""Info messages plain, others as ``fastsasa: WARNING: ...``; with ``debug`` as ``time level [module] message``."""
+	def __init__(self, debug: bool = False) -> None:
+		super().__init__()
+		self.debug = debug
+
+	def format(self, record: logging.LogRecord) -> str:
+		message = record.getMessage()
+		if self.debug:
+			message = f"{self.formatTime(record, '%H:%M:%S')} {record.levelname:7} [{record.name}] {message}"
+		elif record.levelno != logging.INFO:
+			message = f"fastsasa: {record.levelname}: {message}"
+		if record.exc_info:
+			message += '\n' + self.formatException(record.exc_info)
+		return message
+
+
+def _setup_logging(verbose: bool, quiet: bool) -> None:
+	"""Log the fastsasa messages to stderr: warnings only (quiet), info (default) or debug (verbose)."""
+	level = logging.DEBUG if verbose else logging.WARNING if quiet else logging.INFO
+	for handler in logger.handlers[:]: # main() may run several times (tests, scripts)
+		logger.removeHandler(handler)
+	handler = logging.StreamHandler(sys.stderr)
+	handler.setFormatter(_Formatter(debug=verbose))
+	logger.addHandler(handler)
+	logger.setLevel(level)
+	logger.propagate = False
 
 
 def _radius(text: str) -> tuple[str, float]:
@@ -30,21 +63,24 @@ def _radius(text: str) -> tuple[str, float]:
 def parser() -> argparse.ArgumentParser:
 	p = argparse.ArgumentParser(
 		prog='fastsasa',
-		description="Shrake-Rupley solvent accessible surface area (nm^2) of every molecule of a "
-		            "selection over a trajectory. Every molecule is taken on its own (other "
-		            "molecules do not bury it). Writes one column per molecule, per atom "
-		            "(per-atom) or per group (group).",
+		description="Shrake-Rupley solvent accessible surface area (nm^2) of a selection over a "
+		            "trajectory. By default every molecule is taken on its own (other molecules "
+		            "do not bury it) and gets its own column; with whole the selection is one "
+		            "body (its molecules bury each other) and one column is written. Columns "
+		            "per atom (per-atom) or per group (group) instead.",
 		formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 	p.add_argument('-V', action='version', version=f'%(prog)s {__version__}')
 
 	io = p.add_argument_group('input/output')
 	io.add_argument('-s', required=True, help='topology (tpr, gro, pdb, ...); a tpr gives molecules and elements', dest='topology')
 	io.add_argument('-f', nargs='*', default=[], help='trajectory file(s) (xtc, trr, ...); default the topology coordinates', dest='trajectory')
-	io.add_argument('-o', default='sasa.xvg', help='output file: .xvg/.dat (text) or .npz (times, frames, sasa, labels)', dest='output')
+	io.add_argument('-o', default='sasa.xvg', help='output file: .xvg or .npz', dest='output')
 
 	sel = p.add_argument_group('selection')
 	sel.add_argument('-select', default='all', help='MDAnalysis selection of the atoms whose SASA is computed')
-	sel.add_argument('-per-atom', action='store_true', help='one column per atom instead of per molecule')
+	sel.add_argument('-whole', action='store_true', help='SASA of the whole selection as one body (its molecules bury each other), '
+	                 'one column instead of one per molecule (each on its own)')
+	sel.add_argument('-per-atom', action='store_true', help='one column per atom instead of per molecule/selection')
 	sel.add_argument('-group', action='append', default=[], metavar='SELECTION',
 	                 help='one column with the summed SASA of these atoms (MDAnalysis selection within select); repeatable')
 	sel.add_argument('-total', action='store_true', help='add a column with the total SASA of the selection')
@@ -64,8 +100,24 @@ def parser() -> argparse.ArgumentParser:
 	perf = p.add_argument_group('performance')
 	perf.add_argument('-max-frame-atoms', type=int, default=20000, help='atoms (summed over frames) per parallel call')
 	perf.add_argument('-nt', type=int, default=None, help='number of threads (default: all cores)', dest='threads')
-	perf.add_argument('-q', action='store_true', help='no progress bar', dest='quiet')
+	log = p.add_argument_group('logging').add_mutually_exclusive_group()
+	log.add_argument('-v', action='store_true', help='verbose: debug messages (molecules, radii, timing)', dest='verbose')
+	log.add_argument('-q', action='store_true', help='quiet: only warnings and errors, no progress bar', dest='quiet')
 	return p
+
+
+def _molecule_labels(ag) -> list[str]:
+	"""
+	Label of every molecule (order of :func:`split_molecules`): its moltype (tpr), else
+	the residue name of its first residue, numbered from 1 within that name, e.g. GSH1, GSH2, SOL1.
+	"""
+	labels, counts = [], {}
+	for molecule in split_molecules(ag):
+		name = molecule.moltypes[0] if hasattr(molecule, 'moltypes') else (
+		       molecule.resnames[0] if hasattr(molecule, 'resnames') else 'molecule')
+		counts[name] = counts.get(name, 0) + 1
+		labels.append(f"{name}{counts[name]}")
+	return labels
 
 
 def _columns(sasa: SASA, args: argparse.Namespace) -> tuple[np.ndarray, list[str]]:
@@ -78,9 +130,13 @@ def _columns(sasa: SASA, args: argparse.Namespace) -> tuple[np.ndarray, list[str
 	elif args.per_atom:
 		columns.extend(sasa.sasa)
 		labels.extend(f"{a.resname}{a.resid}:{a.name}" for a in sasa.ag)
+	elif args.whole: # one column: the total already
+		columns.append(sasa.get_sasa())
+		labels.append(args.select)
+		return np.array(columns).reshape(1, len(sasa.frames)), labels
 	else:
 		columns.extend(sasa.get_molecule_sasa())
-		labels.extend(f"molecule {i}" for i in range(sasa.n_molecules))
+		labels.extend(_molecule_labels(sasa.ag))
 	if args.total:
 		columns.append(sasa.get_sasa())
 		labels.append('total')
@@ -104,29 +160,43 @@ def main(argv: Sequence[str] | None = None) -> int:
 	args = parser().parse_args(argv)
 	if args.per_atom and args.group:
 		parser().error('per-atom and group cannot be combined')
+	_setup_logging(args.verbose, args.quiet)
+	logger.debug("fastsasa %s: %s", __version__, ' '.join(sys.argv[1:] if argv is None else argv))
 	if args.threads is not None:
 		import numba
 		numba.set_num_threads(args.threads)
 
 	import MDAnalysis as mda
+	logger.debug("reading %s %s", args.topology, ' '.join(args.trajectory))
 	universe = mda.Universe(args.topology, *args.trajectory)
 	if not hasattr(universe, 'trajectory'):
-		print(f"fastsasa: error: {args.topology} has no coordinates; give a trajectory with -f", file=sys.stderr)
+		logger.error("%s has no coordinates; give a trajectory with -f", args.topology)
 		return 1
+	logger.debug("universe: %d atoms, %d frame(s)", universe.atoms.n_atoms, universe.trajectory.n_frames)
 	ag = universe.select_atoms(args.select)
 	if not ag.n_atoms:
-		print(f"fastsasa: error: the selection {args.select!r} contains no atoms", file=sys.stderr)
+		logger.error("the selection %r contains no atoms", args.select)
 		return 1
 	for group in args.group: # check the groups before the (long) calculation
-		if not ag.select_atoms(group).n_atoms:
-			print(f"fastsasa: error: the group {group!r} contains no atoms of the selection", file=sys.stderr)
+		n_group = ag.select_atoms(group).n_atoms
+		if not n_group:
+			logger.error("the group %r contains no atoms of the selection", group)
 			return 1
+		logger.debug("group %r: %d atom(s)", group, n_group)
 
-	sasa = SASA(ag, cg=args.cg, probe=args.probe, ndots=args.ndots, radii=dict(args.radius) or None,
-	            max_frame_atoms=args.max_frame_atoms)
-	if not args.quiet:
-		print(f"{ag.n_atoms} atoms in {sasa.n_molecules} molecule(s), "
-		      f"{len(universe.trajectory[args.start:args.stop:args.step])} frame(s)", file=sys.stderr)
+	if not args.whole and (n_types := n_molecule_types(ag)) > 1:
+		logger.warning("the selection %r contains %d different molecule types; their molecules are written "
+		               "as columns side by side (whole: one column for the selection)", args.select, n_types)
+
+	try:
+		sasa = SASA(ag, cg=args.cg, probe=args.probe, ndots=args.ndots, radii=dict(args.radius) or None,
+		            max_frame_atoms=args.max_frame_atoms, per_molecule=not args.whole)
+	except ValueError as error: # e.g. unknown elements
+		logger.error("%s", error)
+		return 1
+	logger.info("%d atoms in %d %s, %d frame(s)", ag.n_atoms, sasa.n_molecules,
+	            'body (whole selection)' if args.whole else 'molecule(s)',
+	            len(universe.trajectory[args.start:args.stop:args.step]))
 	sasa.run(start=args.start, stop=args.stop, step=args.step, verbose=not args.quiet)
 
 	columns, labels = _columns(sasa, args)
@@ -136,8 +206,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 	else:
 		command = 'fastsasa ' + shlex.join(sys.argv[1:] if argv is None else argv)
 		_write_xvg(output, sasa.times, columns, labels, command)
-	if not args.quiet:
-		print(f"wrote {len(labels)} column(s) x {len(sasa.frames)} frame(s) to {output}", file=sys.stderr)
+	logger.info("wrote %d column(s) x %d frame(s) to %s", len(labels), len(sasa.frames), output)
 	return 0
 
 

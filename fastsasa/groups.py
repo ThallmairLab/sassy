@@ -1,8 +1,11 @@
 """
 Molecules of an AtomGroup: which atoms bury each other.
 """
+import logging
 import numpy as np
 import MDAnalysis as mda
+
+logger = logging.getLogger(__name__)
 
 
 def molecule_index(ag: mda.AtomGroup) -> np.ndarray:
@@ -17,6 +20,7 @@ def molecule_index(ag: mda.AtomGroup) -> np.ndarray:
 	names, every residue is a molecule.
 	'''
 	if hasattr(ag.atoms, 'molnums') or not hasattr(ag.atoms, 'names'):
+		logger.debug("molecules from the %s of the topology", 'molnums' if hasattr(ag.atoms, 'molnums') else 'residues')
 		keys = ag.molnums if hasattr(ag.atoms, 'molnums') else ag.resindices
 		_, first, inverse = np.unique(keys, return_index=True, return_inverse=True)
 		rank = np.empty(len(first), dtype=int)
@@ -50,8 +54,10 @@ def copy_length(ag: mda.AtomGroup) -> int:
 			continue
 		relative = resids.reshape(copies, length) - resids[::length, None]
 		if (relative == relative[0]).all():
+			logger.debug("molecules from repeating units: %d copies of %d atoms", copies, length)
 			return length
-	print(f"WARNING: could not find a repeating unit! Treating whole AtomGroup as one molecule.")
+	logger.warning("could not find a repeating unit in %d atoms; treating the whole AtomGroup as one molecule "
+	               "(give a topology with molecules, e.g. a tpr, or select one molecule type)", n)
 	return n
 
 def split_molecules(ag: mda.AtomGroup) -> list[mda.AtomGroup]:
@@ -61,3 +67,19 @@ def split_molecules(ag: mda.AtomGroup) -> list[mda.AtomGroup]:
 	'''
 	molecules = molecule_index(ag)
 	return [ag[molecules == i] for i in range(molecules.max() + 1 if len(molecules) else 0)]
+
+def n_molecule_types(ag: mda.AtomGroup) -> int:
+	'''
+	Number of different molecule types in ``ag``: by the moltypes of the topology
+	(tpr), else by the sequence of atom names and residue names of every
+	molecule (see :func:`molecule_index`).
+	'''
+	if ag.n_atoms == 0:
+		return 0
+	if hasattr(ag.atoms, 'moltypes'):
+		return len(np.unique(ag.moltypes))
+	molecules = molecule_index(ag)
+	attrs = [attr for attr in ('names', 'resnames') if hasattr(ag.atoms, attr)]
+	types = {tuple(tuple(getattr(ag[molecules == i], attr)) for attr in attrs)
+	         for i in range(molecules.max() + 1)}
+	return len(types)

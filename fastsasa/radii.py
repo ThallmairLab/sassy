@@ -8,8 +8,11 @@ regular); dummy beads have no radius. The probe radius is the radius of a
 tiny bead.
 """
 from collections.abc import Mapping
+import logging
 import numpy as np
 import MDAnalysis as mda
+
+logger = logging.getLogger(__name__)
 
 AA_RADII = {
 	'H': 0.109,
@@ -59,6 +62,7 @@ def atom_symbols(ag: mda.AtomGroup, cg: bool = False) -> list[str]:
 		return [at[0] if at[0] in ("S", "T", "U") else "R" for at in ag.types]
 	if hasattr(ag.atoms, "elements"):
 		return [_symbol(el if el else a.name[0]) for el, a in zip(ag.elements, ag)]
+	logger.debug("no elements in the topology: guessing them from the atom names")
 	guess = _element_guesser()
 	guessed = {name: guess(name) for name in set(ag.names)}
 	return [_symbol(guessed[name] or name[:1]) for name in ag.names]
@@ -106,4 +110,9 @@ def atom_radii(ag: mda.AtomGroup, cg: bool = False, table: Mapping[str, float] |
 		                 f"{'bead' if cg else 'atom'}(s): {atoms}{more}. "
 		                 f"Known {kind}s: {', '.join(table)}. Pass radii (nm) for the missing "
 		                 f"{kind}s as a dict, e.g. radii={{{', '.join(f'{s!r}: ...' for s in missing)}}}.")
+	if custom:
+		logger.debug("custom radii (nm): %s", ', '.join(f'{s}={r}' for s, r in custom.items()))
+	if logger.isEnabledFor(logging.DEBUG):
+		used = dict(zip(*np.unique(symbols, return_counts=True)))
+		logger.debug("radii (nm) used: %s", ', '.join(f'{s}={table[s]} ({n}x)' for s, n in used.items()))
 	return np.array([table[sym] for sym in symbols])
