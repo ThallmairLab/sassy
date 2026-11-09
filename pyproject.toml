@@ -27,6 +27,7 @@ dependencies = [
     "scipy",
     "numba",
     "MDAnalysis",
+    "matplotlib",
 ]
 
 [project.scripts]

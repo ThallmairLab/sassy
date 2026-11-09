@@ -87,6 +87,9 @@ def parser() -> argparse.ArgumentParser:
 	io.add_argument('-s', required=True, help='topology (tpr, gro, pdb, ...); a tpr gives molecules and elements', dest='topology')
 	io.add_argument('-f', nargs='*', default=[], help='trajectory file(s) (xtc, trr, ...); default the topology coordinates', dest='trajectory')
 	io.add_argument('-o', default='sasa.xvg', help='output file: .xvg or .npz', dest='output')
+	io.add_argument('-plots', nargs='?', const='.', default=None, metavar='DIR',
+	                help='save plots (PNG) to this directory, the current one if none is given: total SASA '
+	                     'over time with running mean, every molecule/group over time, distributions')
 
 	sel = p.add_argument_group('selection')
 	sel.add_argument('-select', default='all', help='MDAnalysis selection of the atoms whose SASA is computed')
@@ -281,6 +284,20 @@ def main(argv: Sequence[str] | None = None) -> int:
 		command = 'fastsasa ' + shlex.join(sys.argv[1:] if argv is None else argv)
 		_write_xvg(output, sasa.times, columns, labels, command)
 	logger.info("wrote %d column(s) x %d frame(s) to %s", len(labels), len(sasa.frames), output)
+
+	if args.plots is not None:
+		from ..plots import pooled_atom_sasa, save_plots
+		kind = 'group' if args.group else 'whole' if args.whole else 'molecule'
+		if args.group:
+			has_total = args.total # the last column is the total
+			values, series_labels = (columns[:-1], labels[:-1]) if has_total else (columns, labels)
+		elif args.whole:
+			values, series_labels = sasa.get_sasa()[None], [args.select]
+		else: # molecules, also with -per-atom: the same plots as without
+			values, series_labels = sasa.get_molecule_sasa(), _molecule_labels(sasa.ag)
+		atom_labels, atoms = pooled_atom_sasa(sasa) if args.per_atom else (None, None)
+		save_plots(args.plots, sasa.times, values, series_labels, total=sasa.get_sasa(), kind=kind,
+		           atoms=atoms, atom_labels=atom_labels)
 
 	if surface is not None:
 		try:
