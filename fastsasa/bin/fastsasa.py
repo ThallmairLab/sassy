@@ -17,7 +17,7 @@ from .. import __version__
 from ..groups import n_molecule_types, split_molecules
 from ..radii import PROBE_RADIUS
 from ..sasa import N_DOTS, SASA
-from ..surface import SURFACE_DOTS
+from ..surface import STATISTICS, SURFACE_DOTS
 
 logger = logging.getLogger('fastsasa')
 
@@ -62,6 +62,16 @@ def _radius(text: str) -> tuple[str, float]:
 		raise argparse.ArgumentTypeError(f"expected SYMBOL=RADIUS (nm), e.g. Na=0.227, got {text!r}") from None
 
 
+def _statistic(text: str) -> str | float:
+	"""Name of a statistic of the SASA series, or a SASA value (nm^2)."""
+	if text in STATISTICS:
+		return text
+	try:
+		return float(text)
+	except ValueError:
+		raise argparse.ArgumentTypeError(f"expected {', '.join(STATISTICS)} or a SASA (nm^2), got {text!r}") from None
+
+
 def parser() -> argparse.ArgumentParser:
 	p = argparse.ArgumentParser(
 		prog='fastsasa',
@@ -100,18 +110,22 @@ def parser() -> argparse.ArgumentParser:
 	                   help='radius (nm) by element (bead size with cg), adds to or replaces the defaults; repeatable')
 
 	surf = p.add_argument_group('surface', 'structure and solvent accessible surface dots (Connolly-style '
-	                            'dot surface) of one frame as PDB: atoms as ATOM, dots as HETATM DOT records')
+	                            'dot surface) of one frame as PDB: atoms as ATOM, dots as HETATM records named DOT with the residue of their atom')
 	surf.add_argument('-surface', default=None, metavar='FILE.pdb', help='write the surface dots to this PDB file')
 	surf.add_argument('-surface-molecule', default=None, metavar='MOLECULE',
-	                  help='only this molecule: index (0 = first) or column label (e.g. GSH2); default the whole selection')
+	                  help='molecule of the surface: index (0 = first) or column label (e.g. GSH2); default the first '
+	                       'molecule (with -whole the surface is that of the whole selection)')
 	surface_frame = surf.add_mutually_exclusive_group()
 	surface_frame.add_argument('-surface-frame', type=int, default=None, metavar='FRAME',
 	                           help='trajectory frame of the surface (default: the analysed frame whose SASA is '
-	                                'closest to the median)')
+	                                'closest to the median, see surface-stat)')
 	surface_frame.add_argument('-surface-ref', default=None, metavar='FILE',
 	                           help='reference structure (pdb, gro, ...; same atoms in the same order, e.g. a mapped '
 	                                'atomistic structure for a CG model): use the analysed frame with the lowest RMSD '
 	                                'to it, superposed onto it')
+	surface_frame.add_argument('-surface-stat', type=_statistic, default='median', metavar='STAT',
+	                           help=f"use the analysed frame whose SASA is closest to this statistic of the SASA "
+	                                f"series ({', '.join(STATISTICS)}) or to this SASA (nm^2)")
 	surf.add_argument('-surface-ndots', type=int, default=SURFACE_DOTS, help='minimum number of dots per atom of the surface')
 
 	perf = p.add_argument_group('performance')
@@ -166,7 +180,7 @@ def _surface_options(args: argparse.Namespace, sasa: SASA) -> dict | bool:
 	Molecule, frame and reference of -surface as keyword arguments of :meth:`SASA.write_surface`,
 	checked before the (long) calculation; False (after logging the error) if they are invalid.
 	"""
-	molecule = None
+	molecule = 0 # per molecule: the first; -whole: the whole selection
 	if args.surface_molecule is not None:
 		if args.whole:
 			logger.error("-surface-molecule cannot be combined with -whole (the selection is one body)")
@@ -191,14 +205,14 @@ def _surface_options(args: argparse.Namespace, sasa: SASA) -> dict | bool:
 		reference = mda.Universe(args.surface_ref).atoms
 		n_atoms = sasa.molecule_atoms(molecule).n_atoms
 		if reference.n_atoms != n_atoms:
-			logger.error("the reference structure %s has %d atoms, but the surface has %d%s", args.surface_ref,
-			             reference.n_atoms, n_atoms, '' if molecule is not None else '; select a molecule with -surface-molecule')
+			logger.error("the reference structure %s has %d atoms, but the surface (%s) has %d", args.surface_ref,
+			             reference.n_atoms, 'whole selection' if args.whole else f'molecule {molecule}', n_atoms)
 			return False
 	n_frames = sasa.ag.universe.trajectory.n_frames
 	if args.surface_frame is not None and not -n_frames <= args.surface_frame < n_frames:
 		logger.error("-surface-frame %d out of range for %d frame(s)", args.surface_frame, n_frames)
 		return False
-	return {'molecule': molecule, 'frame': args.surface_frame, 'reference': reference}
+	return {'molecule': molecule, 'frame': args.surface_frame, 'reference': reference, 'statistic': args.surface_stat}
 
 
 def _write_xvg(path: Path, times: np.ndarray, columns: np.ndarray, labels: list[str], command: str) -> None:

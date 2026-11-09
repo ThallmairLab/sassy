@@ -22,13 +22,13 @@ from .groups import copy_length, molecule_index, n_molecule_types, split_molecul
 from .radii import AA_RADII, CG_RADII, PROBE_RADIUS, atom_radii, atom_symbols, radii_remarks
 from .sasa import N_DOTS, SASA
 from .units import to_angstrom, to_nm
-from .surface import SURFACE_DOTS, Surface, best_matching_frame, closest_to_median, generate_surface
+from .surface import SURFACE_DOTS, Surface, STATISTICS, best_matching_frame, closest_to, generate_surface
 
 __version__ = "0.1.0"
 
 __all__ = [
 	"SASA", "N_DOTS", "surface_dots", "to_nm", "to_angstrom",
-	"Surface", "SURFACE_DOTS", "best_matching_frame", "closest_to_median", "generate_surface",
+	"Surface", "SURFACE_DOTS", "STATISTICS", "best_matching_frame", "closest_to", "generate_surface",
 	"unit_dots", "ico_dot_arc", "ico_dot_dod",
 	"copy_length", "molecule_index", "n_molecule_types", "split_molecules",
 	"AA_RADII", "CG_RADII", "PROBE_RADIUS", "atom_radii", "atom_symbols", "radii_remarks",
