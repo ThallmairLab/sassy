@@ -24,8 +24,8 @@ SURFACE_DOTS = 240 # default minimum number of dots per atom of a written surfac
 @dataclass
 class Surface:
 	"""
-	Solvent accessible surface dots of a structure, see :func:`surface_of` and
-	:meth:`SASA.surface`.
+	Solvent accessible surface dots of a structure, see :func:`generate_surface` and
+	:meth:`SASA.write_surface`.
 
 	Attributes
 	----------
@@ -68,10 +68,10 @@ class Surface:
 		write_surface_pdb(fname, self)
 
 
-def surface_of(atoms: mda.AtomGroup, radii: ArrayLike | None = None, probe: float = PROBE_RADIUS,
-               block: ArrayLike | None = None, frame: int | None = None,
-               reference: ArrayLike | mda.AtomGroup | None = None, frames: ArrayLike | None = None,
-               ndots: int = SURFACE_DOTS, cg: bool = False) -> Surface:
+def generate_surface(atoms: mda.AtomGroup, radii: ArrayLike | None = None, probe: float = PROBE_RADIUS,
+                     block: ArrayLike | None = None, frame: int | None = None,
+                     reference: ArrayLike | mda.AtomGroup | None = None, frames: ArrayLike | None = None,
+                     ndots: int = SURFACE_DOTS, cg: bool = False) -> Surface:
 	"""
 	Solvent accessible surface dots (Connolly-style dot surface) of ``atoms`` in one
 	frame of their trajectory.
@@ -112,9 +112,11 @@ def surface_of(atoms: mda.AtomGroup, radii: ArrayLike | None = None, probe: floa
 	radii = atom_radii(atoms, cg=cg) if radii is None else np.asarray(radii, dtype=float)
 	trajectory = atoms.universe.trajectory
 	current = trajectory.ts.frame
+
+	# select the frame and get the positions of the atoms
 	rmsd = None
 	try:
-		if reference is not None:
+		if reference is not None: # select structure closest to the reference structure and superpose it onto it
 			reference = reference.positions if hasattr(reference, 'positions') else np.asarray(reference)
 			if reference.shape != (atoms.n_atoms, 3):
 				raise ValueError(f"The reference structure has {len(reference)} atoms, but the surface has "
@@ -125,14 +127,17 @@ def surface_of(atoms: mda.AtomGroup, radii: ArrayLike | None = None, probe: floa
 			frame, rmsd = int(frames[best]), rmsd / 10.0
 			logger.info("frame %d is closest to the reference structure (RMSD %.3f nm), superposed onto it",
 			            frame, rmsd)
-		else:
+		else: # select the given frame or fall back to current frame 
 			frame = current if frame is None else int(np.arange(trajectory.n_frames)[frame]) # IndexError
 			positions = trajectory[frame].positions[atoms.indices].astype(np.float64)
 		time = float(trajectory[frame].time)
 	finally:
 		trajectory[current] # leave the trajectory on the frame it was on
 
+	# generate dots
 	dots, owners, area = surface_dots(positions / 10.0, radii, probe=probe, ndots=ndots, block=block)
+
+	# write remarks for the PDB file
 	n_dots = len(unit_dots(int(ndots)))
 	remarks = [f"Structure (ATOM) and solvent accessible surface dots (HETATM), fastsasa {_version()}",
 	           f"Frame {frame}, time {time:g} ps, SASA {area:.3f} nm^2, {n_dots} dots per atom"]

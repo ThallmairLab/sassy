@@ -14,7 +14,7 @@ from .dots import unit_dots
 from .engine import _exposed_dots
 from .groups import molecule_index
 from .radii import PROBE_RADIUS, atom_radii
-from .surface import SURFACE_DOTS, Surface, closest_to_median, surface_of
+from .surface import SURFACE_DOTS, Surface, closest_to_median, generate_surface
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +127,7 @@ class SASA:
 		# parallelization
 		self._frames_per_block = max(1, max_frame_atoms // max(1, len(active)))
 
-		# results of run(), see get_sasa / get_molecule_sasa
+		# prep results of run(), see get_sasa / get_molecule_sasa
 		self._lookup = np.full(ag.universe.atoms.n_atoms, -1, dtype=np.int64) # universe index -> index in ag
 		self._lookup[ag.indices] = np.arange(ag.n_atoms)
 		self.sasa = None # (n_atoms, n_frames) SASA (nm^2) of every atom of ag, only with save_atoms
@@ -140,9 +140,10 @@ class SASA:
 		             'molecule(s)' if per_molecule else 'body (whole AtomGroup)', len(self.unit), probe,
 		             self._frames_per_block)
 
+	# SASA calculation
 	def _atom_areas(self, xyz: np.ndarray) -> np.ndarray:
 		"""
-		SASA (nm^2) of every atom with a radius in a block of frames.
+		SASA (nm^2) of every atom in a block of frames.
 
 		Parameters
 		----------
@@ -265,6 +266,7 @@ class SASA:
 		             n_frames / elapsed if elapsed > 0 else float('inf'))
 		return self.sasa if per_atom else self.molecule_sasa
 
+	# SASA retrieval
 	def _ag_indices(self, selection: str | mda.AtomGroup | None) -> np.ndarray:
 		"""Indices in ``ag`` of the atoms of a selection string (applied to ``ag``) or an AtomGroup."""
 		if selection is None:
@@ -287,6 +289,10 @@ class SASA:
 		return indices
 
 	def _check_run(self, atoms: bool = False) -> None:
+		'''
+		Check that a SASA has been computed with SASA.run, and that the SASA of every atom is available if ``atoms``.
+		  Raises a RuntimeError otherwise.
+		'''
 		if self.frames is None:
 			raise RuntimeError("No SASA computed yet: call run() first.")
 		if atoms and self.sasa is None:
@@ -295,7 +301,7 @@ class SASA:
 
 	def get_sasa(self, selection: str | mda.AtomGroup | None = None, per_atom: bool = False) -> np.ndarray:
 		"""
-		SASA (nm^2) over time of a selection of the atoms of ``ag``, from the last SASA.run().
+		SASA (nm^2) over time of a selection of the atoms of ag, from the last SASA.run().
 
 		The SASA of every atom is that within its own (whole) molecule, so the SASA
 		of a selection is the part of the molecules' surface that belongs to its
@@ -361,6 +367,7 @@ class SASA:
 		return self.molecule_sasa[index]
 
 
+	# SASA surface visualization
 	def molecule_atoms(self, molecule: int | None = None) -> mda.AtomGroup:
 		"""
 		Atoms of a molecule (index as in :meth:`get_molecule_sasa`, negative counts from
@@ -372,21 +379,26 @@ class SASA:
 			raise IndexError(f"Molecule index {molecule} out of range for {self.n_molecules} molecule(s).")
 		return self.ag[self._molecule_of_atom == molecule % self.n_molecules]
 
-	def surface(self, frame: int | None = None, molecule: int | None = None,
-	            reference: ArrayLike | mda.AtomGroup | None = None, ndots: int = SURFACE_DOTS) -> Surface:
+	def write_surface(self, fname: str, frame: int | None = None, molecule: int | None = None,
+	                  reference: ArrayLike | mda.AtomGroup | None = None,
+	                  ndots: int = SURFACE_DOTS) -> Surface:
 		"""
-		Solvent accessible surface dots (Connolly-style dot surface) of the atoms of
-		``ag``, or of one molecule, in one frame, with the radii and probe of this SASA,
-		see :func:`surface_of`.
+		Write the structure and its solvent accessible surface dots (Connolly-style dot
+		surface) of the atoms of ``ag``, or of one molecule, in one frame to a PDB file,
+		with the radii and probe of this SASA; see :func:`generate_surface` and :meth:`Surface.write`
+		(format).
 
 		The dots follow the mode of the SASA: with ``per_molecule`` every molecule has
 		its own surface (other molecules do not bury it), else the AtomGroup has one.
 
 		Parameters
 		----------
+		fname : str
+			PDB file to write
 		frame : int, optional
-			trajectory frame; default the frame of the last :meth:`run` whose SASA (of the
-			molecule, or of ``ag``) is closest to the median, i.e. a representative structure
+			trajectory frame (negative counts from the end); default the frame of the last
+			:meth:`run` whose SASA (of the molecule, or of ``ag``) is closest to the median,
+			i.e. a representative structure
 		molecule : int, optional
 			molecule index (as in :meth:`get_molecule_sasa`); default all atoms of ``ag``
 		reference : np.ndarray or MDAnalysis.AtomGroup, optional
@@ -401,7 +413,7 @@ class SASA:
 		Returns
 		-------
 		Surface
-			structure, dots and area (nm^2, from the dots); write it with :meth:`Surface.write`
+			the written structure, dots and area (nm^2, from the dots)
 		"""
 		atoms = self.molecule_atoms(molecule)
 		if frame is None and reference is None:
@@ -411,23 +423,10 @@ class SASA:
 			frame = int(self.frames[best])
 			logger.info("frame %d has the SASA closest to the median (%.3f nm^2)", frame, series[best])
 		indices = self._lookup[atoms.indices]
-		return surface_of(atoms, radii=self.radii[indices] if self._custom_radii else None,
-		                  probe=self.probe, block=self._molecule_of_atom[indices], frame=frame,
-		                  reference=reference, frames=self.frames, ndots=ndots, cg=self.cg)
-
-	def write_surface(self, fname: str, frame: int | None = None, molecule: int | None = None,
-	                  reference: ArrayLike | mda.AtomGroup | None = None,
-	                  ndots: int = SURFACE_DOTS) -> Surface:
-		"""
-		Write the structure and its solvent accessible surface dots of one frame to a
-		PDB file, see :meth:`surface` (parameters) and :meth:`Surface.write` (format).
-
-		Returns
-		-------
-		Surface
-		"""
-		surface = self.surface(frame=frame, molecule=molecule, reference=reference, ndots=ndots)
-		surface.write(fname)
+		result = generate_surface(atoms, radii=self.radii[indices] if self._custom_radii else None,
+		                          probe=self.probe, block=self._molecule_of_atom[indices], frame=frame,
+		                          reference=reference, frames=self.frames, ndots=ndots, cg=self.cg)
+		result.write(fname)
 		logger.info("wrote the surface of frame %d (%d atoms, %d dots, SASA %.3f nm^2) to %s",
-		            surface.frame, surface.atoms.n_atoms, len(surface.dots), surface.area, fname)
-		return surface
+		            result.frame, result.atoms.n_atoms, len(result.dots), result.area, fname)
+		return result

@@ -4,7 +4,7 @@ import pytest
 import MDAnalysis as mda
 from MDAnalysis.lib.transformations import rotation_matrix
 
-from fastsasa import SASA, Surface, best_matching_frame, closest_to_median, surface_of
+from fastsasa import SASA, Surface, best_matching_frame, closest_to_median, generate_surface
 from fastsasa.bin.fastsasa import main
 from conftest import DATA
 
@@ -31,34 +31,34 @@ def test_helpers():
     assert np.allclose(aligned, reference, atol=1e-6)
 
 
-def test_surface_of(gsh_aa):
+def test_surface_function(gsh_aa, tmp_path):
     """
     Without a SASA: the current frame by default, default or custom radii; the same
-    surface as SASA.surface.
+    surface as SASA.write_surface.
     """
     gsh_aa.universe.trajectory[5]
-    surface = surface_of(gsh_aa)
-    assert surface.frame == 5 and gsh_aa.universe.trajectory.ts.frame == 5
-    assert surface.area == pytest.approx(SASA(gsh_aa, ndots=240).surface(frame=5).area, rel=1e-12)
-    assert not any('Custom' in remark for remark in surface.remarks)
+    result = generate_surface(gsh_aa)
+    assert result.frame == 5 and gsh_aa.universe.trajectory.ts.frame == 5
+    assert result.area == pytest.approx(SASA(gsh_aa, ndots=240).write_surface(tmp_path / 'x.pdb', frame=5).area, rel=1e-12)
+    assert not any('Custom' in remark for remark in result.remarks)
     sasa = SASA(gsh_aa, ndots=240, radii={'S': 0.2})
-    custom = sasa.surface(frame=5)
+    custom = sasa.write_surface(tmp_path / 'x.pdb', frame=5)
     assert 'Custom radii' in custom.remarks
-    assert custom.area == pytest.approx(surface_of(gsh_aa, radii=sasa.radii, frame=5).area)
-    assert custom.area != pytest.approx(surface.area)
+    assert custom.area == pytest.approx(generate_surface(gsh_aa, radii=sasa.radii, frame=5).area)
+    assert custom.area != pytest.approx(result.area)
     assert np.array_equal(sasa.molecule_atoms(0).indices, gsh_aa.indices)
 
 
-def test_surface_area_and_frame(gsh_aa):
+def test_surface_area_and_frame(gsh_aa, tmp_path):
     """
     The area of the dots equals the SASA of that frame; by default the frame of the
     run whose SASA is closest to the median is used.
     """
     sasa = SASA(gsh_aa, ndots=240)
     with pytest.raises(RuntimeError, match='run'):
-        sasa.surface()
+        sasa.write_surface(tmp_path / 'x.pdb')
     series = sasa.run(step=2)[0]
-    surface = sasa.surface()
+    surface = sasa.write_surface(tmp_path / 'x.pdb')
     assert surface.frame == sasa.frames[closest_to_median(series)]
     assert surface.area == pytest.approx(series[closest_to_median(series)], rel=1e-6)
     assert surface.dots.shape[1] == 3 and len(surface.owners) == len(surface.dots)
@@ -68,31 +68,31 @@ def test_surface_area_and_frame(gsh_aa):
     assert np.allclose(distance, sasa.radii[surface.owners] + sasa.probe)
     # explicit frame (negative counts from the end), trajectory left where it was
     gsh_aa.universe.trajectory[3]
-    last = sasa.surface(frame=-1)
+    last = sasa.write_surface(tmp_path / 'x.pdb', frame=-1)
     assert last.frame == gsh_aa.universe.trajectory.n_frames - 1
     assert gsh_aa.universe.trajectory.ts.frame == 3
     with pytest.raises(IndexError):
-        sasa.surface(frame=1000)
+        sasa.write_surface(tmp_path / 'x.pdb', frame=1000)
 
 
-def test_surface_reference(gsh_aa):
+def test_surface_reference(gsh_aa, tmp_path):
     """A reference picks the frame with the lowest RMSD, superposed onto it."""
     sasa = SASA(gsh_aa, ndots=240)
     gsh_aa.universe.trajectory[7]
     rotation = rotation_matrix(1.2, [0, 1, 1])[:3, :3]
     reference = gsh_aa.positions @ rotation.T + [30.0, -4.0, 2.0]
-    surface = sasa.surface(reference=reference)
+    surface = sasa.write_surface(tmp_path / 'x.pdb', reference=reference)
     assert surface.frame == 7 and surface.rmsd == pytest.approx(0, abs=1e-5)
     assert np.allclose(surface.positions, reference, atol=1e-3)
     sasa.run(step=2) # then only the frames of the run: 7 is not among them
-    assert sasa.surface(reference=reference).frame in sasa.frames
+    assert sasa.write_surface(tmp_path / 'x.pdb', reference=reference).frame in sasa.frames
     with pytest.raises(ValueError, match='not both'):
-        sasa.surface(frame=0, reference=reference)
+        sasa.write_surface(tmp_path / 'x.pdb', frame=0, reference=reference)
     with pytest.raises(ValueError, match='reference structure has'):
-        sasa.surface(reference=reference[:-1])
+        sasa.write_surface(tmp_path / 'x.pdb', reference=reference[:-1])
 
 
-def test_surface_molecules(gsh_aa):
+def test_surface_molecules(gsh_aa, tmp_path):
     """
     Per molecule, molecules do not bury each other's dots; as a whole they do;
     one molecule can be selected.
@@ -100,14 +100,14 @@ def test_surface_molecules(gsh_aa):
     two = two_molecules(gsh_aa, 4.0) # overlapping
     single = SASA(two, ndots=240)
     single.run(stop=3)
-    alone = SASA(gsh_aa, ndots=240).surface(frame=0).area
-    assert single.surface(frame=0).area == pytest.approx(2 * alone, rel=1e-6)
-    second = single.surface(frame=0, molecule=1)
+    alone = SASA(gsh_aa, ndots=240).write_surface(tmp_path / 'x.pdb', frame=0).area
+    assert single.write_surface(tmp_path / 'x.pdb', frame=0).area == pytest.approx(2 * alone, rel=1e-6)
+    second = single.write_surface(tmp_path / 'x.pdb', frame=0, molecule=1)
     assert second.atoms == two[gsh_aa.n_atoms:] and second.area == pytest.approx(alone, rel=1e-6)
     with pytest.raises(IndexError):
-        single.surface(frame=0, molecule=2)
+        single.write_surface(tmp_path / 'x.pdb', frame=0, molecule=2)
     whole = SASA(two, ndots=240, per_molecule=False)
-    assert whole.surface(frame=0).area < 0.9 * 2 * alone
+    assert whole.write_surface(tmp_path / 'x.pdb', frame=0).area < 0.9 * 2 * alone
 
 
 def test_surface_pdb(gsh_aa, tmp_path):
@@ -148,7 +148,7 @@ def test_cli_surface(tmp_path, capsys):
     for options, message in [(['-whole', '-surface-molecule', '0'], 'cannot be combined with -whole'),
                              (['-surface-molecule', 'SOL3'], 'no molecule of the selection'),
                              (['-surface-molecule', '5'], 'out of range'),
-                             (['-surface-frame', '9999'], 'surface:')]:
+                             (['-surface-frame', '9999'], 'out of range for 501 frame(s)')]:
         assert main(run + ['-q', '-surface', str(dots)] + options) == 1
         assert message in capsys.readouterr().err
     with pytest.raises(SystemExit): # frame or reference
