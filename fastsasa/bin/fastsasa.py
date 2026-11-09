@@ -2,7 +2,7 @@
 Command line interface: SASA of the molecules, atoms or selections of a
 trajectory, written as an xvg (text) or npz file.
 
-	fastsasa -s topol.tpr -f traj.xtc --select 'moltype GSH' -o sasa.xvg
+	fastsasa -s topol.tpr -f traj.xtc select 'moltype GSH' -o sasa.xvg
 """
 import argparse
 import shlex
@@ -11,9 +11,9 @@ from collections.abc import Sequence
 from pathlib import Path
 import numpy as np
 
-from . import __version__
-from .radii import PROBE_RADIUS
-from .sasa import N_DOTS, SASA
+from .. import __version__
+from ..radii import PROBE_RADIUS
+from ..sasa import N_DOTS, SASA
 
 
 def _radius(text: str) -> tuple[str, float]:
@@ -33,38 +33,38 @@ def parser() -> argparse.ArgumentParser:
 		description="Shrake-Rupley solvent accessible surface area (nm^2) of every molecule of a "
 		            "selection over a trajectory. Every molecule is taken on its own (other "
 		            "molecules do not bury it). Writes one column per molecule, per atom "
-		            "(--per-atom) or per group (--group).",
+		            "(per-atom) or per group (group).",
 		formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-	p.add_argument('-V', '--version', action='version', version=f'%(prog)s {__version__}')
+	p.add_argument('-V', action='version', version=f'%(prog)s {__version__}')
 
 	io = p.add_argument_group('input/output')
-	io.add_argument('-s', '--topology', required=True, help='topology (tpr, gro, pdb, ...); a tpr gives molecules and elements')
-	io.add_argument('-f', '--trajectory', nargs='*', default=[], help='trajectory file(s) (xtc, trr, ...); default the topology coordinates')
-	io.add_argument('-o', '--output', default='sasa.xvg', help='output file: .xvg/.dat (text) or .npz (times, frames, sasa, labels)')
+	io.add_argument('-s', required=True, help='topology (tpr, gro, pdb, ...); a tpr gives molecules and elements', dest='topology')
+	io.add_argument('-f', nargs='*', default=[], help='trajectory file(s) (xtc, trr, ...); default the topology coordinates', dest='trajectory')
+	io.add_argument('-o', default='sasa.xvg', help='output file: .xvg/.dat (text) or .npz (times, frames, sasa, labels)', dest='output')
 
 	sel = p.add_argument_group('selection')
-	sel.add_argument('--select', default='all', help='MDAnalysis selection of the atoms whose SASA is computed')
-	sel.add_argument('--per-atom', action='store_true', help='one column per atom instead of per molecule')
-	sel.add_argument('--group', action='append', default=[], metavar='SELECTION',
-	                 help='one column with the summed SASA of these atoms (MDAnalysis selection within --select); repeatable')
-	sel.add_argument('--total', action='store_true', help='add a column with the total SASA of the selection')
+	sel.add_argument('-select', default='all', help='MDAnalysis selection of the atoms whose SASA is computed')
+	sel.add_argument('-per-atom', action='store_true', help='one column per atom instead of per molecule')
+	sel.add_argument('-group', action='append', default=[], metavar='SELECTION',
+	                 help='one column with the summed SASA of these atoms (MDAnalysis selection within select); repeatable')
+	sel.add_argument('-total', action='store_true', help='add a column with the total SASA of the selection')
 
 	frames = p.add_argument_group('frames')
-	frames.add_argument('-b', type=int, default=None, help='first frame')
-	frames.add_argument('-e', type=int, default=None, help='frame to stop before')
-	frames.add_argument('-skip', type=int, default=None, help='use every skip-th frame')
+	frames.add_argument('-b', type=int, default=None, help='First frame', dest='start')
+	frames.add_argument('-e', type=int, default=None, help='Last frame', dest='stop')
+	frames.add_argument('-skip', type=int, default=None, help='use every skip-th frame', dest='step')
 
 	model = p.add_argument_group('model')
-	model.add_argument('--cg', action='store_true', help='Martini CG bead radii instead of atomistic radii')
-	model.add_argument('--probe', type=float, default=PROBE_RADIUS, help='probe radius (nm)')
-	model.add_argument('--ndots', type=int, default=N_DOTS, help='minimum number of dots per atom')
-	model.add_argument('--radius', type=_radius, action='append', default=[], metavar='SYMBOL=RADIUS',
-	                   help='radius (nm) by element (bead size with --cg), adds to or replaces the defaults; repeatable')
+	model.add_argument('-cg', action='store_true', help='Martini CG bead radii instead of atomistic radii')
+	model.add_argument('-probe', type=float, default=PROBE_RADIUS, help='probe radius (nm)')
+	model.add_argument('-ndots', type=int, default=N_DOTS, help='minimum number of dots per atom')
+	model.add_argument('-radius', type=_radius, action='append', default=[], metavar='SYMBOL=RADIUS',
+	                   help='radius (nm) by element (bead size with cg), adds to or replaces the defaults; repeatable')
 
 	perf = p.add_argument_group('performance')
-	perf.add_argument('--max-frame-atoms', type=int, default=20000, help='atoms (summed over frames) per parallel call')
-	perf.add_argument('-nt', '--threads', type=int, default=None, help='number of threads (default: all cores)')
-	perf.add_argument('-q', '--quiet', action='store_true', help='no progress bar')
+	perf.add_argument('-max-frame-atoms', type=int, default=20000, help='atoms (summed over frames) per parallel call')
+	perf.add_argument('-nt', type=int, default=None, help='number of threads (default: all cores)', dest='threads')
+	perf.add_argument('-q', action='store_true', help='no progress bar', dest='quiet')
 	return p
 
 
@@ -103,7 +103,7 @@ def _write_xvg(path: Path, times: np.ndarray, columns: np.ndarray, labels: list[
 def main(argv: Sequence[str] | None = None) -> int:
 	args = parser().parse_args(argv)
 	if args.per_atom and args.group:
-		parser().error('--per-atom and --group cannot be combined')
+		parser().error('per-atom and group cannot be combined')
 	if args.threads is not None:
 		import numba
 		numba.set_num_threads(args.threads)

@@ -51,6 +51,7 @@ def copy_length(ag: mda.AtomGroup) -> int:
 		relative = resids.reshape(copies, length) - resids[::length, None]
 		if (relative == relative[0]).all():
 			return length
+	print(f"WARNING: could not find a repeating unit! Treating whole AtomGroup as one molecule.")
 	return n
 
 def split_molecules(ag: mda.AtomGroup) -> list[mda.AtomGroup]:

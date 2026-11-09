@@ -29,11 +29,12 @@ dependencies = [
     "MDAnalysis",
 ]
 
+[project.scripts]
+fastsasa = "fastsasa.bin.fastsasa:main"
+
 [dependency-groups]
 tests = ["pytest"]
 
-[tool.setuptools.packages.find]
-where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
