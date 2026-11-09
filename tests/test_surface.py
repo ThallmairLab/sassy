@@ -4,7 +4,7 @@ import pytest
 import MDAnalysis as mda
 from MDAnalysis.lib.transformations import rotation_matrix
 
-from fastsasa import SASA, Surface, best_matching_frame, closest_to_median, generate_surface
+from fastsasa import SASA, Surface, best_matching_frame, closest_to_median, generate_surface, to_nm
 from fastsasa.bin.fastsasa import main
 from conftest import DATA
 
@@ -64,7 +64,7 @@ def test_surface_area_and_frame(gsh_aa, tmp_path):
     assert surface.dots.shape[1] == 3 and len(surface.owners) == len(surface.dots)
     assert surface.atoms == gsh_aa
     # dots lie on the probe-expanded spheres of their atoms
-    distance = np.linalg.norm(surface.dots - surface.positions[surface.owners], axis=1) / 10
+    distance = np.linalg.norm(surface.dots - surface.positions[surface.owners], axis=1)
     assert np.allclose(distance, sasa.radii[surface.owners] + sasa.probe)
     # explicit frame (negative counts from the end), trajectory left where it was
     gsh_aa.universe.trajectory[3]
@@ -80,10 +80,10 @@ def test_surface_reference(gsh_aa, tmp_path):
     sasa = SASA(gsh_aa, ndots=240)
     gsh_aa.universe.trajectory[7]
     rotation = rotation_matrix(1.2, [0, 1, 1])[:3, :3]
-    reference = gsh_aa.positions @ rotation.T + [30.0, -4.0, 2.0]
+    reference = to_nm(gsh_aa.positions) @ rotation.T + [3.0, -0.4, 0.2] # nm
     surface = sasa.write_surface(tmp_path / 'x.pdb', reference=reference)
     assert surface.frame == 7 and surface.rmsd == pytest.approx(0, abs=1e-5)
-    assert np.allclose(surface.positions, reference, atol=1e-3)
+    assert np.allclose(surface.positions, reference, atol=1e-4)
     sasa.run(step=2) # then only the frames of the run: 7 is not among them
     assert sasa.write_surface(tmp_path / 'x.pdb', reference=reference).frame in sasa.frames
     with pytest.raises(ValueError, match='not both'):
@@ -123,8 +123,9 @@ def test_surface_pdb(gsh_aa, tmp_path):
     atoms, dots = written.select_atoms('record_type ATOM'), written.select_atoms('resname DOT')
     assert atoms.n_atoms == gsh_aa.n_atoms and list(atoms.names) == list(gsh_aa.names)
     assert dots.n_atoms == len(surface.dots) and set(dots.record_types) == {'HETATM'}
-    assert np.allclose(atoms.positions, surface.positions, atol=1e-3)
-    assert np.allclose(dots.positions, surface.dots, atol=1e-3)
+    # coordinates in nm, written in Å (PDB: 0.001 Å)
+    assert np.allclose(to_nm(atoms.positions), surface.positions, atol=1e-4)
+    assert np.allclose(to_nm(dots.positions), surface.dots, atol=1e-4)
     assert np.array_equal(dots.resids, gsh_aa.resids[surface.owners])
 
 

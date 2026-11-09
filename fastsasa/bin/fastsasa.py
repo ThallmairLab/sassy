@@ -194,6 +194,10 @@ def _surface_options(args: argparse.Namespace, sasa: SASA) -> dict | bool:
 			logger.error("the reference structure %s has %d atoms, but the surface has %d%s", args.surface_ref,
 			             reference.n_atoms, n_atoms, '' if molecule is not None else '; select a molecule with -surface-molecule')
 			return False
+	n_frames = sasa.ag.universe.trajectory.n_frames
+	if args.surface_frame is not None and not -n_frames <= args.surface_frame < n_frames:
+		logger.error("-surface-frame %d out of range for %d frame(s)", args.surface_frame, n_frames)
+		return False
 	return {'molecule': molecule, 'frame': args.surface_frame, 'reference': reference}
 
 

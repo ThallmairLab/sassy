@@ -14,6 +14,7 @@ from .dots import unit_dots
 from .engine import _exposed_dots
 from .groups import molecule_index
 from .radii import PROBE_RADIUS, atom_radii
+from .units import to_nm
 from .surface import SURFACE_DOTS, Surface, closest_to_median, generate_surface
 
 logger = logging.getLogger(__name__)
@@ -114,8 +115,8 @@ class SASA:
 
 		# prepare dots
 		self.unit = unit_dots(int(ndots))
-		self._ext = (radii[active] + probe) * 10.0 # Å
-		self._dot_area = 4 * np.pi * (self._ext / 10.0)**2 / len(self.unit) # nm^2 per dot
+		self._ext = radii[active] + probe # expanded radii (nm)
+		self._dot_area = 4 * np.pi * self._ext**2 / len(self.unit) # nm^2 per dot
 		
 		# every molecule is placed relative to its first atom
 		# anchor is the index of the first atom of every molecule in the active atom
@@ -148,7 +149,7 @@ class SASA:
 		Parameters
 		----------
 		xyz : np.ndarray
-			(n_frames, n_atoms, 3) positions (Å) of the atoms with a radius
+			(n_frames, n_atoms, 3) positions (nm) of the atoms with a radius
 
 		Returns
 		-------
@@ -160,7 +161,7 @@ class SASA:
 		# put every (frame, molecule) block in its own slab along x and seperate them,
 		# so a _neighbor_list finds the neighbours of all of them and no pairs between them
 		xyz = xyz - xyz[:, self._anchor]
-		span = 2 * np.abs(xyz).max() + 2 * self._ext.max() + 1.0
+		span = 2 * np.abs(xyz).max() + 2 * self._ext.max() + 0.1 # nm
 		block = (np.arange(n_frames)[:, None] * self.n_molecules + self._molecules[None]).ravel()
 		xyz = xyz.reshape(-1, 3)
 		xyz[:, 0] += block * span
@@ -181,14 +182,14 @@ class SASA:
 		buffer = []
 		try:
 			for ts in trajectory[start:stop:step]:
-				buffer.append(ts.positions[self._indices]) # save positions
+				buffer.append(to_nm(ts.positions[self._indices])) # save positions (nm)
 				if times is not None:
 					times.append(ts.time)
 				if len(buffer) == self._frames_per_block: 
-					yield self._atom_areas(np.array(buffer, dtype=np.float64)) # run SASA calculation
+					yield self._atom_areas(np.array(buffer)) # run SASA calculation
 					buffer = []
 			if buffer:
-				yield self._atom_areas(np.array(buffer, dtype=np.float64))
+				yield self._atom_areas(np.array(buffer))
 		finally:
 			trajectory[current] # leave the trajectory on the frame it was on
 
@@ -402,7 +403,7 @@ class SASA:
 		molecule : int, optional
 			molecule index (as in :meth:`get_molecule_sasa`); default all atoms of ``ag``
 		reference : np.ndarray or MDAnalysis.AtomGroup, optional
-			reference structure, (n_atoms, 3) positions (Å) or an AtomGroup with as many
+			reference structure, (n_atoms, 3) positions (nm) or an AtomGroup with as many
 			atoms as the surface (in the same order, e.g. a mapped atomistic structure for
 			a CG model): instead of ``frame``, the frame (of the last :meth:`run`, else of
 			the whole trajectory) with the lowest RMSD to it is used, superposed onto it, so

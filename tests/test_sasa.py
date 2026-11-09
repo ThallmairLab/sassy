@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from fastsasa import SASA, atom_radii, atom_symbols, split_molecules, surface_dots
+from fastsasa import SASA, atom_radii, atom_symbols, split_molecules, surface_dots, to_nm
 
 
 def test_sasa_class(gsh_aa):
@@ -15,7 +15,7 @@ def test_sasa_class(gsh_aa):
     radii = atom_radii(gsh_aa)
     for frame in (0, 7, 19):
         gsh_aa.universe.trajectory[frame]
-        _, _, area = surface_dots(gsh_aa.positions / 10, radii, ndots=240)
+        _, _, area = surface_dots(to_nm(gsh_aa.positions), radii, ndots=240)
         assert sasa[0, frame] == pytest.approx(area, rel=1e-6)
     # one frame per block
     one_by_one = SASA(gsh_aa, ndots=240, max_frame_atoms=1).run()
@@ -38,7 +38,7 @@ def test_sasa_per_atom(gsh_aa):
     assert np.all(per_atom[3] == 0)
     assert np.allclose(per_atom.sum(axis=0), sasa.run()[0], rtol=1e-10)
     gsh_aa.universe.trajectory[7]
-    _, owners, _ = surface_dots(gsh_aa.positions / 10, radii, ndots=240)
+    _, owners, _ = surface_dots(to_nm(gsh_aa.positions), radii, ndots=240)
     ext = radii + 0.191
     expected = np.bincount(owners, minlength=gsh_aa.n_atoms) * 4 * np.pi * ext**2 / len(sasa.unit)
     assert np.allclose(per_atom[:, 7], expected, rtol=1e-6)

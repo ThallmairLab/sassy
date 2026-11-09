@@ -15,6 +15,7 @@ from MDAnalysis.analysis.align import rotation_matrix
 from .dots import unit_dots
 from .engine import surface_dots
 from .radii import PROBE_RADIUS, atom_radii, radii_remarks
+from .units import to_angstrom, to_nm
 
 logger = logging.getLogger(__name__)
 
@@ -32,9 +33,9 @@ class Surface:
 	atoms : MDAnalysis.AtomGroup
 		the atoms of the structure
 	positions : np.ndarray
-		(n_atoms, 3) positions (Å) of the atoms
+		(n_atoms, 3) positions (nm) of the atoms
 	dots : np.ndarray
-		(n_dots, 3) positions (Å) of the exposed surface dots
+		(n_dots, 3) positions (nm) of the exposed surface dots
 	owners : np.ndarray
 		(n_dots,) index in ``atoms`` of the atom every dot belongs to
 	area : float
@@ -90,7 +91,7 @@ def generate_surface(atoms: mda.AtomGroup, radii: ArrayLike | None = None, probe
 	frame : int, optional
 		trajectory frame (negative counts from the end); default the current frame
 	reference : np.ndarray or MDAnalysis.AtomGroup, optional
-		reference structure, (n_atoms, 3) positions (Å) or an AtomGroup with as many
+		reference structure, (n_atoms, 3) positions (nm) or an AtomGroup with as many
 		atoms (in the same order, e.g. a mapped atomistic structure for a CG model):
 		instead of ``frame``, the frame of ``frames`` with the lowest RMSD to it is used,
 		superposed onto it, so that both surfaces share one coordinate frame
@@ -117,25 +118,25 @@ def generate_surface(atoms: mda.AtomGroup, radii: ArrayLike | None = None, probe
 	rmsd = None
 	try:
 		if reference is not None: # select structure closest to the reference structure and superpose it onto it
-			reference = reference.positions if hasattr(reference, 'positions') else np.asarray(reference)
+			reference = to_nm(reference.positions) if hasattr(reference, 'positions') else np.asarray(reference, dtype=float)
 			if reference.shape != (atoms.n_atoms, 3):
 				raise ValueError(f"The reference structure has {len(reference)} atoms, but the surface has "
 				                 f"{atoms.n_atoms}; select one molecule with a matching reference.")
 			frames = np.arange(trajectory.n_frames) if frames is None else np.asarray(frames)
-			coordinates = np.array([trajectory[f].positions[atoms.indices] for f in frames])
+			coordinates = np.array([to_nm(trajectory[f].positions[atoms.indices]) for f in frames])
 			best, positions, rmsd = best_matching_frame(coordinates, reference)
-			frame, rmsd = int(frames[best]), rmsd / 10.0
+			frame = int(frames[best])
 			logger.info("frame %d is closest to the reference structure (RMSD %.3f nm), superposed onto it",
 			            frame, rmsd)
 		else: # select the given frame or fall back to current frame 
 			frame = current if frame is None else int(np.arange(trajectory.n_frames)[frame]) # IndexError
-			positions = trajectory[frame].positions[atoms.indices].astype(np.float64)
+			positions = to_nm(trajectory[frame].positions[atoms.indices])
 		time = float(trajectory[frame].time)
 	finally:
 		trajectory[current] # leave the trajectory on the frame it was on
 
 	# generate dots
-	dots, owners, area = surface_dots(positions / 10.0, radii, probe=probe, ndots=ndots, block=block)
+	dots, owners, area = surface_dots(positions, radii, probe=probe, ndots=ndots, block=block)
 
 	# write remarks for the PDB file
 	n_dots = len(unit_dots(int(ndots)))
@@ -145,7 +146,7 @@ def generate_surface(atoms: mda.AtomGroup, radii: ArrayLike | None = None, probe
 		remarks.append(f"Superposed onto the reference structure, RMSD {rmsd:.3f} nm")
 	remarks += radii_remarks(atoms, cg=cg, custom=custom, probe=probe)
 	logger.debug("surface of frame %d: %d atoms, %d dots, SASA %.3f nm^2", frame, atoms.n_atoms, len(dots), area)
-	return Surface(atoms, positions, dots * 10.0, owners, area, frame, time, rmsd, remarks)
+	return Surface(atoms, positions, dots, owners, area, frame, time, rmsd, remarks)
 
 
 def _version() -> str:
@@ -205,7 +206,7 @@ def write_surface_pdb(fname: str | Path, surface: Surface) -> None:
 
 def _write_pdb(fname: str | Path, positions: np.ndarray, names, resnames, resids, chains,
                record_types, remarks: list[str]) -> None:
-	"""Write per-record arrays as a PDB file with MDAnalysis. Positions are in Å."""
+	"""Write per-record arrays as a PDB file with MDAnalysis. Positions are in nm."""
 	n_records = len(positions)
 	# one residue per consecutive (chain, resid, resname) block
 	resindex, res_keys = [], {}
@@ -226,7 +227,7 @@ def _write_pdb(fname: str | Path, positions: np.ndarray, names, resnames, resids
 	universe.add_TopologyAttr('tempfactors', np.zeros(n_records))
 	universe.add_TopologyAttr('elements', [''] * n_records)
 	universe.add_TopologyAttr('formalcharges', np.zeros(n_records, dtype=int))
-	universe.atoms.positions = positions
+	universe.atoms.positions = to_angstrom(positions) # MDAnalysis writes Å
 	universe.trajectory.remarks = list(remarks)
 	with warnings.catch_warnings():
 		# a (superposed) molecule has no meaningful box: the unitary CRYST1 record is intended
