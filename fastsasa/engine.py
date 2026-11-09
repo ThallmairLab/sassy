@@ -148,7 +148,7 @@ def _exposed_dots(xyz: ArrayLike, ext: ArrayLike, block: ArrayLike, unit: np.nda
 	return exposed
 
 def surface_dots(xyz: ArrayLike, radii: ArrayLike, probe: float = PROBE_RADIUS,
-                 ndots: int = 240) -> tuple[np.ndarray, np.ndarray, float]:
+                 ndots: int = 240, block: ArrayLike | None = None) -> tuple[np.ndarray, np.ndarray, float]:
 	"""
 	Generate dots of the solvent accessible surface of a set of spheres.
 
@@ -163,6 +163,9 @@ def surface_dots(xyz: ArrayLike, radii: ArrayLike, probe: float = PROBE_RADIUS,
 		probe radius, in the units of ``xyz`` (default in nm)
 	ndots : int
 		minimum number of dots per sphere
+	block : np.ndarray, optional
+		(n_atoms,) integer block (e.g. molecule index) of every atom: atoms only bury
+		dots of atoms in the same block; default all atoms in one block
 
 	Returns
 	-------
@@ -182,7 +185,8 @@ def surface_dots(xyz: ArrayLike, radii: ArrayLike, probe: float = PROBE_RADIUS,
 
 	# compute the exposed dots and the SASA from them
 	expanded = radii[active] + probe
-	exposed = _exposed_dots(centres, expanded, np.zeros(len(active), dtype=int), unit)
+	block = np.zeros(len(xyz), dtype=int) if block is None else np.asarray(block)
+	exposed = _exposed_dots(centres, expanded, block[active], unit)
 	area = float(np.sum(exposed.mean(axis=1) * 4 * np.pi * expanded**2))
 	dots = (centres[:, None, :] + expanded[:, None, None] * unit[None])[exposed] # coordinates of dots
 	owners = active[np.nonzero(exposed)[0]] # index of the atom each dot belongs to

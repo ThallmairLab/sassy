@@ -67,6 +67,23 @@ def atom_symbols(ag: mda.AtomGroup, cg: bool = False) -> list[str]:
 	guessed = {name: guess(name) for name in set(ag.names)}
 	return [_symbol(guessed[name] or name[:1]) for name in ag.names]
 
+def radii_remarks(ag: mda.AtomGroup, cg: bool = False, custom: bool = False,
+                  probe: float = PROBE_RADIUS) -> list[str]:
+	'''
+	Short description of the radii used for ``ag`` and their sources, e.g. for the
+	REMARK records of a written surface; ``custom`` notes radii given by the user.
+	'''
+	remarks = ["Custom radii"] if custom else []
+	if cg:
+		remarks.append(f"Martini CG radii: bead sizes tiny {CG_RADII['T']}, small {CG_RADII['S']}, "
+		               f"regular {CG_RADII['R']} nm")
+	else:
+		remarks.append("Atomistic vdW radii: Rowland & Taylor (1996), doi:10.1021/jp953141+")
+		if 'P' in atom_symbols(ag):
+			remarks.append("Phosphorus radius: Bondi (1964), doi:10.1021/j100785a001")
+	remarks.append(f"Probe radius {probe} nm")
+	return remarks
+
 def atom_radii(ag: mda.AtomGroup, cg: bool = False, table: Mapping[str, float] | None = None) -> np.ndarray:
 	'''
 	Van der Waals radii (nm) of the atoms in ``ag``, as used for the SASA.
