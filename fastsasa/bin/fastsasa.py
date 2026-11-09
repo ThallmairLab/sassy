@@ -218,6 +218,27 @@ def _surface_options(args: argparse.Namespace, sasa: SASA) -> dict | bool:
 	return {'molecule': molecule, 'frame': args.surface_frame, 'reference': reference, 'statistic': args.surface_stat}
 
 
+def _highlight(sasa: SASA, args: argparse.Namespace, surface, molecule: int):
+	"""
+	The frame of the surface for the plots: its time, and, if the frame was analysed, the
+	SASA of its molecule (of the selection with -whole) and with -per-atom of its atoms.
+	Groups are no molecules: time only.
+	"""
+	from ..plots import Highlight, atom_sasa_at
+	label = f"surface frame {surface.frame}"
+	analysed = np.flatnonzero(sasa.frames == surface.frame)
+	if args.group or not len(analysed):
+		if not len(analysed):
+			logger.debug("surface frame %d was not analysed: marked in the time plots only", surface.frame)
+		return Highlight(time=surface.time, label=label)
+	series = molecule % sasa.n_molecules
+	if not args.whole:
+		label += f" ({_molecule_labels(sasa.ag)[series]})"
+	return Highlight(time=surface.time, sasa=float(sasa.get_molecule_sasa(series)[analysed[0]]),
+	                 series=series, label=label,
+	                 atoms=atom_sasa_at(sasa, series, surface.frame) if args.per_atom else None)
+
+
 def _write_xvg(path: Path, times: np.ndarray, columns: np.ndarray, labels: list[str], command: str) -> None:
 	with open(path, 'w') as out:
 		out.write(f"# created by fastsasa {__version__}\n# command: {command}\n")
@@ -285,6 +306,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 		_write_xvg(output, sasa.times, columns, labels, command)
 	logger.info("wrote %d column(s) x %d frame(s) to %s", len(labels), len(sasa.frames), output)
 
+	status, highlight = 0, None
+	if surface is not None:
+		try:
+			result = sasa.write_surface(args.surface, ndots=args.surface_ndots, return_surface=True, **surface)
+		except (IndexError, ValueError) as error: # e.g. frame out of range
+			logger.error("surface: %s", error)
+			status = 1 # the plots are still written
+		else:
+			highlight = _highlight(sasa, args, result, surface['molecule'])
+
 	if args.plots is not None:
 		from ..plots import pooled_atom_sasa, save_plots
 		kind = 'group' if args.group else 'whole' if args.whole else 'molecule'
@@ -297,15 +328,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 			values, series_labels = sasa.get_molecule_sasa(), _molecule_labels(sasa.ag)
 		atom_labels, atoms = pooled_atom_sasa(sasa) if args.per_atom else (None, None)
 		save_plots(args.plots, sasa.times, values, series_labels, total=sasa.get_sasa(), kind=kind,
-		           atoms=atoms, atom_labels=atom_labels)
-
-	if surface is not None:
-		try:
-			sasa.write_surface(args.surface, ndots=args.surface_ndots, **surface)
-		except (IndexError, ValueError) as error: # e.g. frame out of range
-			logger.error("surface: %s", error)
-			return 1
-	return 0
+		           atoms=atoms, atom_labels=atom_labels, highlight=highlight)
+	return status
 
 
 if __name__ == '__main__':

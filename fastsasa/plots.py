@@ -10,6 +10,7 @@ The functions take plain arrays, so they work for molecules, groups or atoms ali
 	>>> save_plots('plots', sasa.times, sasa.molecule_sasa, total=sasa.total_sasa)
 """
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 import numpy as np
 from numpy.typing import ArrayLike
@@ -36,8 +37,38 @@ DISTRIBUTION_COLOR = '#6970E0'
 ZOOM_THRESHOLD = 0.01 # x range where the density exceeds 1 % of its maximum ...
 PAD_FRACTION = 0.1 # ... plus this fraction of that range on both sides (fast_forward: 0.25 nm^2),
 MIN_PAD_BINS = 2 # ... but at least this many bins
+HIGHLIGHT_COLOR = '#c00000' # the frame of the surface (red, dashed: apart from the series colors)
 SASA_LABEL = 'SASA [nm²]'
 DENSITY_LABEL = 'Probability Density'
+
+
+@dataclass
+class Highlight:
+	"""
+	A frame to highlight in the plots by a red vertical line, e.g. that of the surface
+	(:meth:`SASA.write_surface`): at its time in the time plots and at its SASA in the
+	distributions.
+
+	Attributes
+	----------
+	time : float
+		time (ps) of the frame
+	sasa : float, optional
+		SASA (nm^2) of the highlighted series in the frame; None: not in the distributions
+	series : int, optional
+		index of the highlighted series (its panel in the per-series distributions);
+		None: in no panel
+	label : str
+		legend label of the line
+	atoms : dict of int to float, optional
+		SASA (nm^2) of the atoms in the frame by their panel in the per-atom distributions
+		(see :func:`atom_sasa_at`); None: in no atom panel
+	"""
+	time: float
+	sasa: float | None = None
+	series: int | None = None
+	label: str = 'surface frame'
+	atoms: dict[int, float] | None = None
 
 
 def _figure(width: float = 7.0, height: float = 4.0, nrows: int = 1, ncols: int = 1, **kwargs):
@@ -78,6 +109,26 @@ def _time_axis(times: np.ndarray) -> tuple[np.ndarray, str]:
 	return times, 'Time [ps]'
 
 
+def _mark(ax, x: float, label: str | None = None) -> None:
+	"""The highlighted frame: a red dashed vertical line at ``x`` (time or SASA)."""
+	ax.axvline(x, color=HIGHLIGHT_COLOR, linewidth=1.2, linestyle='--', label=label, zorder=3)
+
+
+def _mark_time(ax, times: np.ndarray, highlight: Highlight | None, dot: bool = False) -> None:
+	"""
+	The highlighted frame at its time: a red dashed vertical line, or with ``dot`` a red dot
+	at its SASA on the line of its series (if both are known, else the vertical line).
+	"""
+	if highlight is None:
+		return
+	time = highlight.time / 1000.0 if _time_axis(times)[1] == 'Time [ns]' else highlight.time
+	if dot and highlight.sasa is not None and highlight.series is not None:
+		ax.plot([time], [highlight.sasa], linestyle='none', marker='o', markersize=7, color=HIGHLIGHT_COLOR,
+		        markeredgecolor=SURFACE, markeredgewidth=1.5, label=highlight.label, zorder=4)
+	else:
+		_mark(ax, time, highlight.label)
+
+
 def _end_labels(ax, x: np.ndarray, series: np.ndarray, labels: list[str]) -> None:
 	"""Direct labels at the line ends (<= 4 series), spread apart so they do not overlap."""
 	if len(series) > 4 or not len(x):
@@ -104,8 +155,12 @@ def _default_labels(values: np.ndarray, labels: list[str] | None, noun: str) -> 
 	return list(labels) if labels is not None else [f"{noun} {i}" for i in range(len(values))]
 
 
-def plot_total(times: ArrayLike, total: ArrayLike, fname: str | Path, title: str = 'Total SASA') -> Path:
-	"""Total SASA over time with its running (cumulative) mean, to judge convergence."""
+def plot_total(times: ArrayLike, total: ArrayLike, fname: str | Path, title: str = 'Total SASA',
+               highlight: Highlight | None = None) -> Path:
+	"""
+	Total SASA over time with its running (cumulative) mean, to judge convergence, and the
+	time of the ``highlight`` frame.
+	"""
 	total = np.asarray(total, dtype=float)
 	x, xlabel = _time_axis(times)
 	fig, axes = _figure()
@@ -113,6 +168,7 @@ def plot_total(times: ArrayLike, total: ArrayLike, fname: str | Path, title: str
 	running = np.cumsum(total) / np.arange(1, len(total) + 1)
 	ax.plot(x, total, color=SERIES_COLORS[0], linewidth=LINE_WIDTH, label='SASA')
 	ax.plot(x, running, color=TEXT, linewidth=LINE_WIDTH, linestyle='--', label='running mean')
+	_mark_time(ax, times, highlight)
 	_legend(ax)
 	_labels(ax, xlabel, SASA_LABEL)
 	if len(total):
@@ -122,10 +178,11 @@ def plot_total(times: ArrayLike, total: ArrayLike, fname: str | Path, title: str
 
 
 def plot_time(times: ArrayLike, values: ArrayLike, fname: str | Path, labels: list[str] | None = None,
-              noun: str = 'molecule') -> Path:
+              noun: str = 'molecule', highlight: Highlight | None = None) -> Path:
 	"""
 	SASA of every series over time: up to 8 series as colored lines (direct labels for
-	up to 4), more as faint lines behind their mean.
+	up to 4), more as faint lines behind their mean; the ``highlight`` frame as a dot on
+	its series (a vertical line at its time if its SASA or series is not known).
 	"""
 	values = np.atleast_2d(np.asarray(values, dtype=float))
 	labels = _default_labels(values, labels, noun)
@@ -135,8 +192,10 @@ def plot_time(times: ArrayLike, values: ArrayLike, fname: str | Path, labels: li
 	if len(values) <= MAX_SERIES:
 		for color, series, label in zip(SERIES_COLORS, values, labels):
 			ax.plot(x, series, color=color, linewidth=LINE_WIDTH, label=label)
-		if len(values) > 1:
+		_mark_time(ax, times, highlight, dot=True)
+		if len(values) > 1 or highlight is not None:
 			_legend(ax)
+		if len(values) > 1:
 			_end_labels(ax, x, values, labels)
 		_title(ax, f"SASA per {noun}" if len(values) > 1 else f"SASA of {labels[0]}")
 	else:
@@ -145,6 +204,7 @@ def plot_time(times: ArrayLike, values: ArrayLike, fname: str | Path, labels: li
 		ax.plot([], [], color=MUTED, linewidth=0.8, label=f"individual {noun}s")
 		mean = values.mean(axis=0)
 		ax.plot(x, mean, color=SERIES_COLORS[0], linewidth=LINE_WIDTH, label=f"mean of {len(values)} {noun}s")
+		_mark_time(ax, times, highlight, dot=True)
 		_legend(ax)
 		_title(ax, f"SASA of {len(values)} {noun}s")
 	_labels(ax, xlabel, SASA_LABEL)
@@ -182,12 +242,12 @@ def distribution(values: ArrayLike, bin_width: float = BIN_WIDTH, pad: float | N
 	return np.column_stack((edges[:-1] + np.diff(edges) / 2.0, density))
 
 
-def _zoom(ax, curves: list[np.ndarray], threshold: float = ZOOM_THRESHOLD) -> None:
+def _zoom(ax, curves: list[np.ndarray], threshold: float = ZOOM_THRESHOLD, include: float | None = None) -> None:
 	"""
 	As fast_forward: limit the x axis to where any density exceeds ``threshold`` times its
 	maximum, plus padding on both sides (fast_forward: 0.25 nm^2; here 10 % of that range,
 	at least two bins, so that narrow distributions such as single atoms fill the plot),
-	but not below 0.
+	but not below 0. The range is extended to ``include`` (nm^2, e.g. a highlighted SASA).
 	"""
 	low, high = np.inf, -np.inf
 	for curve in curves:
@@ -195,6 +255,8 @@ def _zoom(ax, curves: list[np.ndarray], threshold: float = ZOOM_THRESHOLD) -> No
 			continue
 		significant = curve[curve[:, 1] > threshold * curve[:, 1].max(), 0]
 		low, high = min(low, significant.min()), max(high, significant.max())
+	if include is not None:
+		low, high = min(low, include), max(high, include)
 	if np.isfinite(low):
 		pad = _pad(low, high)
 		ax.set_xlim(max(0.0, low - pad), high + pad) # SASA >= 0
@@ -205,11 +267,14 @@ def _plot_density(ax, curve: np.ndarray, color: str = DISTRIBUTION_COLOR, label:
 
 
 def plot_distribution(values: ArrayLike, fname: str | Path, labels: list[str] | None = None,
-                      noun: str = 'molecule', bin_width: float = BIN_WIDTH) -> Path:
+                      noun: str = 'molecule', bin_width: float = BIN_WIDTH,
+                      highlight: Highlight | None = None) -> Path:
 	"""
 	SASA distribution (probability density, see :func:`distribution`) as lines, zoomed as
-	in fast_forward: one series alone, up to 8 overlaid, more pooled into one.
+	in fast_forward: one series alone, up to 8 overlaid, more pooled into one; the SASA of
+	the ``highlight`` frame.
 	"""
+	mark = highlight.sasa if highlight is not None else None
 	values = np.atleast_2d(np.asarray(values, dtype=float))
 	labels = _default_labels(values, labels, noun)
 	fig, axes = _figure()
@@ -218,28 +283,38 @@ def plot_distribution(values: ArrayLike, fname: str | Path, labels: list[str] | 
 		curves = [distribution(values, bin_width)]
 		_plot_density(ax, curves[0])
 		_title(ax, f"{len(values)} {noun}s pooled sasa" if len(values) > 1 else f"{labels[0]} sasa")
+		if mark is not None:
+			_mark(ax, mark, highlight.label)
+			_legend(ax)
 	else:
 		curves = [distribution(series, bin_width) for series in values]
 		for color, curve, label in zip(SERIES_COLORS, curves, labels):
 			_plot_density(ax, curve, color, label)
+		if mark is not None:
+			_mark(ax, mark, highlight.label)
 		_legend(ax)
 		_title(ax, f"sasa per {noun}")
-	_zoom(ax, curves)
+	_zoom(ax, curves, include=mark)
 	_labels(ax, SASA_LABEL, DENSITY_LABEL)
 	return _save(fig, fname)
 
 
 def plot_distribution_panels(values: ArrayLike | list[ArrayLike], fname: str | Path,
                              labels: list[str] | None = None, noun: str = 'molecule',
-                             bin_width: float = BIN_WIDTH, max_panels: int = MAX_PANELS) -> Path:
+                             bin_width: float = BIN_WIDTH, max_panels: int = MAX_PANELS,
+                             marks: dict[int, float] | None = None, mark_label: str = 'surface frame') -> Path:
 	"""
 	The SASA distribution of every series in its own panel, laid out as fast_forward's
 	distribution plots: 5 columns of 4 x 4 inch panels titled by the label, each zoomed
 	to its distribution, the density label on the first column.
 
 	``values`` is (n_series, n_frames), or a list of series of any length (e.g. an atom
-	pooled over the molecules of its type, see :func:`pooled_atom_sasa`).
+	pooled over the molecules of its type, see :func:`pooled_atom_sasa`). ``marks`` (panel
+	index -> SASA in nm^2, e.g. of a highlighted frame) are drawn as red dashed vertical lines,
+	labelled ``mark_label`` in the legend of the first marked panel.
 	"""
+	marks = marks or {}
+	legend = True # only once
 	values = [np.asarray(series, dtype=float).ravel() for series in
 	          (values if isinstance(values, list) else np.atleast_2d(np.asarray(values, dtype=float)))]
 	labels = _default_labels(values, labels, noun)
@@ -247,10 +322,16 @@ def plot_distribution_panels(values: ArrayLike | list[ArrayLike], fname: str | P
 	ncols = min(5, len(shown))
 	nrows = -(len(shown) // -ncols)
 	fig, axes = _figure(width=4.0 * ncols, height=4.0 * nrows, nrows=nrows, ncols=ncols)
-	for ax, series, label in zip(axes.flat, shown, labels):
+	for i, (ax, series, label) in enumerate(zip(axes.flat, shown, labels)):
 		curve = distribution(series, bin_width)
 		_plot_density(ax, curve)
-		_zoom(ax, [curve])
+		mark = marks.get(i)
+		if mark is not None:
+			_mark(ax, mark, mark_label if legend else None)
+			if legend:
+				_legend(ax)
+				legend = False
+		_zoom(ax, [curve], include=mark)
 		_title(ax, label)
 		ax.set_xlabel(SASA_LABEL, color=TEXT_SECONDARY, fontsize=9)
 	for ax in axes[:, 0]:
@@ -261,6 +342,27 @@ def plot_distribution_panels(values: ArrayLike | list[ArrayLike], fname: str | P
 		fig.suptitle(f"first {max_panels} of {len(values)} {noun}s", color=TEXT_SECONDARY, fontsize=9,
 		             x=0.01, ha='left')
 	return _save(fig, fname)
+
+
+def _molecule_types(sasa) -> dict:
+	"""
+	Molecules of one type (the same moltype (tpr), else the same atom and residue names in
+	the same order): type -> molecule indices, in order of first appearance.
+	"""
+	types = {}
+	for i in range(sasa.n_molecules):
+		atoms = sasa.molecule_atoms(i)
+		if hasattr(atoms, 'moltypes'):
+			key = atoms.moltypes[0]
+		else:
+			key = (tuple(atoms.names), tuple(atoms.resnames) if hasattr(atoms, 'resnames') else ())
+		types.setdefault(key, []).append(i)
+	return types
+
+
+def _with_radius(sasa, atoms) -> np.ndarray:
+	"""Mask of the atoms with a radius (with SASA; no dummy beads, virtual sites)."""
+	return sasa.radii[sasa._lookup[atoms.indices]] > 0
 
 
 def pooled_atom_sasa(sasa) -> tuple[list[str], list[np.ndarray]]:
@@ -285,33 +387,55 @@ def pooled_atom_sasa(sasa) -> tuple[list[str], list[np.ndarray]]:
 	pooled : list of np.ndarray
 		(n_molecules_of_type * n_frames,) SASA (nm^2) of every atom of every type
 	"""
-	types = {} # type -> list of (n_atoms, n_frames) per-atom SASA of its molecules
-	first = {} # type -> atoms of its first molecule
-	for i in range(sasa.n_molecules):
-		atoms = sasa.molecule_atoms(i)
-		if hasattr(atoms, 'moltypes'):
-			key = atoms.moltypes[0]
-		else:
-			key = (tuple(atoms.names), tuple(atoms.resnames) if hasattr(atoms, 'resnames') else ())
-		types.setdefault(key, []).append(sasa.get_sasa(atoms, per_atom=True))
-		first.setdefault(key, atoms)
+	types = _molecule_types(sasa)
 	labels, pooled = [], []
 	for key, molecules in types.items():
-		atoms = first[key]
+		atoms = sasa.molecule_atoms(molecules[0])
 		prefix = f"{key if isinstance(key, str) else atoms.resnames[0]} " if len(types) > 1 else ''
-		stacked = np.stack(molecules, axis=1) # (n_atoms, n_molecules, n_frames)
-		radii = sasa.radii[sasa._lookup[atoms.indices]] # the same for all molecules of the type
-		for atom, radius, series in zip(atoms, radii, stacked):
-			if radius <= 0: # no SASA computed
-				continue
+		kept = _with_radius(sasa, atoms) # the same for all molecules of the type
+		stacked = np.stack([sasa.get_sasa(sasa.molecule_atoms(i), per_atom=True) for i in molecules],
+		                   axis=1) # (n_atoms, n_molecules, n_frames)
+		for atom, series in zip(atoms[kept], stacked[kept]):
 			labels.append(f"{prefix}{atom.resname}{atom.resid}:{atom.name}")
 			pooled.append(series.ravel())
 	return labels, pooled
 
 
+def atom_sasa_at(sasa, molecule: int, frame: int) -> dict[int, float]:
+	"""
+	SASA of the atoms of one molecule in one frame, by their panel in the per-atom
+	distributions of :func:`pooled_atom_sasa` (e.g. to highlight the frame of a surface).
+
+	Parameters
+	----------
+	sasa : SASA
+	molecule : int
+		molecule index (negative counts from the end)
+	frame : int
+		trajectory frame; must be one of the last :meth:`SASA.run`
+
+	Returns
+	-------
+	dict of int to float
+		panel index -> SASA (nm^2); empty if the frame was not analysed
+	"""
+	analysed = np.flatnonzero(sasa.frames == frame)
+	if not len(analysed):
+		return {}
+	molecule %= sasa.n_molecules
+	offset = 0
+	for molecules in _molecule_types(sasa).values():
+		kept = _with_radius(sasa, sasa.molecule_atoms(molecules[0]))
+		if molecule in molecules:
+			values = sasa.get_sasa(sasa.molecule_atoms(molecule), per_atom=True)[kept, analysed[0]]
+			return {offset + k: float(value) for k, value in enumerate(values)}
+		offset += int(kept.sum())
+	raise AssertionError('unreachable: every molecule has a type')
+
+
 def save_plots(directory: str | Path, times: ArrayLike, values: ArrayLike, labels: list[str] | None = None,
                total: ArrayLike | None = None, kind: str = 'molecule', atoms: list[ArrayLike] | None = None,
-               atom_labels: list[str] | None = None) -> list[Path]:
+               atom_labels: list[str] | None = None, highlight: Highlight | None = None) -> list[Path]:
 	"""
 	Save the standard plots of a SASA time series in ``directory`` (created if needed).
 
@@ -334,6 +458,12 @@ def save_plots(directory: str | Path, times: ArrayLike, values: ArrayLike, label
 		:func:`pooled_atom_sasa`): adds ``sasa_distribution_per_atom.png``
 	atom_labels : list of str, optional
 		label of every atom
+	highlight : Highlight, optional
+		frame to mark in red (e.g. that of the surface): a vertical line at its time in
+		``sasa_total``, a dot on its series in ``sasa_time`` (a line if its SASA is not
+		known); a vertical line at its SASA (``highlight.sasa``, of the series
+		``highlight.series``) in ``sasa_distribution`` and the panel of that series, and at
+		the SASA of every atom (``highlight.atoms``) in its per-atom panel
 
 	Returns
 	-------
@@ -353,18 +483,26 @@ def save_plots(directory: str | Path, times: ArrayLike, values: ArrayLike, label
 	values = np.atleast_2d(np.asarray(values, dtype=float))
 	total = values.sum(axis=0) if total is None else np.asarray(total, dtype=float)
 	files = [plot_total(times, total, directory / 'sasa_total.png',
-	                    title='SASA of the selection' if kind == 'whole' else 'Total SASA')]
+	                    title='SASA of the selection' if kind == 'whole' else 'Total SASA', highlight=highlight)]
 	if kind == 'whole':
-		files.append(plot_distribution(total, directory / 'sasa_distribution.png', ['the selection']))
+		files.append(plot_distribution(total, directory / 'sasa_distribution.png', ['the selection'],
+		                               highlight=highlight))
 	else:
 		if len(values) > 1 or kind == 'group':
-			files.append(plot_time(times, values, directory / 'sasa_time.png', labels, noun=kind))
-		files.append(plot_distribution(values, directory / 'sasa_distribution.png', labels, noun=kind))
+			files.append(plot_time(times, values, directory / 'sasa_time.png', labels, noun=kind,
+			                       highlight=highlight))
+		files.append(plot_distribution(values, directory / 'sasa_distribution.png', labels, noun=kind,
+		                               highlight=highlight))
 		if len(values) > 1:
+			marks = ({highlight.series: highlight.sasa} if highlight is not None and highlight.sasa is not None
+			         and highlight.series is not None else None)
 			files.append(plot_distribution_panels(values, directory / f'sasa_distribution_per_{kind}.png',
-			                                      labels, noun=kind))
+			                                      labels, noun=kind, marks=marks,
+			                                      mark_label=highlight.label if highlight else ''))
 	if atoms is not None:
 		files.append(plot_distribution_panels(list(atoms), directory / 'sasa_distribution_per_atom.png',
-		                                      atom_labels, noun='atom', max_panels=MAX_ATOM_PANELS))
+		                                      atom_labels, noun='atom', max_panels=MAX_ATOM_PANELS,
+		                                      marks=highlight.atoms if highlight else None,
+		                                      mark_label=highlight.label if highlight else ''))
 	logger.info("wrote %d plot(s) to %s", len(files), directory)
 	return files

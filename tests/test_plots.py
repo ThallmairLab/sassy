@@ -5,7 +5,8 @@ import pytest
 import MDAnalysis as mda
 
 from fastsasa import SASA
-from fastsasa.plots import BIN_WIDTH, MAX_SERIES, distribution, pooled_atom_sasa, save_plots
+from fastsasa.plots import (BIN_WIDTH, MAX_SERIES, Highlight, atom_sasa_at, distribution, pooled_atom_sasa,
+                            save_plots)
 from fastsasa.bin.fastsasa import main
 from conftest import DATA
 
@@ -46,6 +47,36 @@ def test_save_plots_kinds(tmp_path):
             save_plots(tmp_path, times, values, kind=kind)
 
 
+def test_save_plots_highlight(tmp_path, monkeypatch):
+    """The highlighted frame: a red line at its time and at its SASA in its series' panel."""
+    from matplotlib.axes import Axes
+    marks = []
+    original = Axes.axvline
+    monkeypatch.setattr(Axes, 'axvline', lambda ax, x, **kw: marks.append((ax, x)) or original(ax, x, **kw))
+    times, values = series(3, n_frames=60) # 0 to 590 ps
+    highlight = Highlight(time=200.0, sasa=float(values[1, 20]), series=1, label='surface frame 20')
+    save_plots(tmp_path, times, values, ['GSH1', 'GSH2', 'GSH3'], highlight=highlight)
+    titles = {ax.get_title(loc='left'): x for ax, x in marks} # titles are set after the line
+    assert sum(x == 200.0 for _, x in marks) == 1 # total; the time plot has a dot instead
+    assert 'SASA per molecule' not in titles
+    assert titles['sasa per molecule'] == highlight.sasa # distribution
+    assert titles['GSH2'] == highlight.sasa and 'GSH1' not in titles # only its panel
+    # long trajectories in ns; without SASA: time plots only
+    marks.clear()
+    save_plots(tmp_path / 'ns', times * 100, values, highlight=Highlight(time=20000.0))
+    assert [x for _, x in marks] == [20.0, 20.0]
+    # the dot: on the series at the time of the frame
+    files = save_plots(tmp_path / 'dot', times, values, highlight=highlight)
+    assert any(f.name == 'sasa_time.png' for f in files)
+    from fastsasa.plots import plot_time
+    dots = []
+    original_plot = Axes.plot
+    monkeypatch.setattr(Axes, 'plot', lambda ax, *a, **kw: (dots.append(a) if kw.get('marker') == 'o' else None)
+                        or original_plot(ax, *a, **kw))
+    plot_time(times, values, tmp_path / 't.png', highlight=highlight)
+    assert dots == [([200.0], [highlight.sasa])]
+
+
 def test_pooled_atom_sasa(gsh_aa):
     """Every atom of a molecule type pooled over its molecules; types kept apart."""
     positions = gsh_aa.universe.trajectory.coordinate_array[:, gsh_aa.indices]
@@ -76,6 +107,18 @@ def test_pooled_atom_sasa(gsh_aa):
     assert len(labels) == 2 * n - 2
     assert not any(label.endswith(f":{gsh_aa[0].name}") and label.startswith('GSH') for label in labels)
     assert f"GSX {gsh_aa[3].resname}{gsh_aa[3].resid}:{gsh_aa[3].name}" not in labels
+    # the atoms of one molecule in one frame, by their panel
+    frame = int(dummy.frames[1])
+    for molecule, offset in ((0, 0), (1, 0), (2, n - 1)): # GSH panels first (n - 1 with a radius)
+        panels = atom_sasa_at(dummy, molecule, frame)
+        kept = np.flatnonzero(dummy.radii[molecule * n:(molecule + 1) * n] > 0)
+        assert sorted(panels) == list(range(offset, offset + len(kept)))
+        per_atom = dummy.get_sasa(dummy.molecule_atoms(molecule), per_atom=True)[kept, 1]
+        assert [panels[offset + k] for k in range(len(kept))] == pytest.approx(per_atom)
+        # the value lies in the pooled series of its panel
+        assert all(np.any(pooled[p] == v) for p, v in panels.items())
+    assert atom_sasa_at(dummy, -1, frame) == atom_sasa_at(dummy, 2, frame)
+    assert atom_sasa_at(dummy, 0, 10 ** 6) == {} # not analysed
 
 
 def test_distribution():
@@ -124,3 +167,30 @@ def test_cli_plots(tmp_path, capsys, monkeypatch):
     monkeypatch.chdir(tmp_path)
     assert main(run + ['-plots', '-q']) == 0
     assert (tmp_path / 'sasa_total.png').is_file()
+
+
+def test_cli_plots_surface(tmp_path, monkeypatch):
+    """The frame of the surface is highlighted in the plots."""
+    import fastsasa.plots as plots
+    seen = []
+    original = plots.save_plots
+    monkeypatch.setattr(plots, 'save_plots', lambda *a, **kw: seen.append(kw['highlight']) or original(*a, **kw))
+    run = ['-s', TPR, '-f', XTC, '-select', 'moltype GSH', '-ndots', '240', '-skip', '50', '-q',
+           '-o', str(tmp_path / 'x.xvg'), '-plots', str(tmp_path), '-surface', str(tmp_path / 's.pdb')]
+    assert main(run) == 0
+    sasa = np.loadtxt(tmp_path / 'x.xvg', comments=('#', '@'))
+    highlight = seen[-1]
+    row = np.flatnonzero(np.isclose(sasa[:, 0], highlight.time))[0]
+    assert highlight.series == 0 and highlight.sasa == pytest.approx(sasa[row, 1], abs=1e-3)
+    assert highlight.label.startswith("surface frame ") and highlight.label.endswith(" (GSH1)")
+    assert highlight.atoms is None # without -per-atom
+    # per atom: the atoms of the molecule in the frame, one per panel
+    assert main(run + ['-per-atom']) == 0
+    atoms = seen[-1].atoms
+    assert sorted(atoms) == list(range(36)) and sum(atoms.values()) == pytest.approx(seen[-1].sasa)
+    # a frame that was not analysed: time only
+    assert main(run + ['-surface-frame', '1']) == 0
+    assert seen[-1].sasa is None and seen[-1].series is None
+    # whole: the selection
+    assert main(run + ['-whole']) == 0
+    assert seen[-1].series == 0 and seen[-1].sasa is not None
