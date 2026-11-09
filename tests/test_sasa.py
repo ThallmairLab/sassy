@@ -302,7 +302,8 @@ def test_save_atoms(gsh_aa, tmp_path):
     assert light.sasa is None
     assert np.array_equal(light.get_sasa(), full.get_sasa())
     assert np.array_equal(light.get_molecule_sasa(0), molecules[0])
-    assert light.write_surface(tmp_path / 'a.pdb').frame == full.write_surface(tmp_path / 'b.pdb').frame
+    assert (light.write_surface(tmp_path / 'a.pdb', return_surface=True).frame
+            == full.write_surface(tmp_path / 'b.pdb', return_surface=True).frame)
     with pytest.raises(RuntimeError, match='save_atoms'):
         light.get_sasa('name S*')
     with pytest.raises(RuntimeError, match='save_atoms'):

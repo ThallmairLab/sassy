@@ -1,8 +1,9 @@
 """
 Dot representation of the solvent accessible surface (Connolly-style dot
-surface, as ``gmx sasa -q``), for visual inspection and for comparing
+surface), for visual inspection and for comparing
 atomistic, mapped and coarse-grained structures.
 """
+from collections.abc import Callable
 from dataclasses import dataclass
 import logging
 from pathlib import Path
@@ -11,6 +12,7 @@ import numpy as np
 from numpy.typing import ArrayLike
 import MDAnalysis as mda
 from MDAnalysis.analysis.align import rotation_matrix
+from scipy.stats import gaussian_kde
 
 from .dots import unit_dots
 from .engine import surface_dots
@@ -63,8 +65,8 @@ class Surface:
 	def write(self, fname: str | Path) -> None:
 		"""
 		Write the structure and its dots to a PDB file: the atoms first as ATOM records
-		(chain A), then the dots as HETATM records (chain X) with atom and residue name
-		DOT and the residue id of the atom they belong to.
+		(chain A), then the dots as HETATM records (chain X) with atom name DOT and the
+		residue name and id of the atom they belong to.
 		"""
 		write_surface_pdb(fname, self)
 
@@ -154,10 +156,64 @@ def _version() -> str:
 	return __version__
 
 
-def closest_to_median(values: ArrayLike) -> int:
-	"""Index of the value closest to the median, i.e. a representative frame."""
+def mode(values: ArrayLike, n_grid: int = 1024) -> float:
+	"""
+	Most probable value: the maximum of a Gaussian kernel density estimate of the values
+	(Scott's bandwidth), on a grid of ``n_grid`` points from their minimum to maximum.
+	For bimodal distributions this is the higher peak, where mean and median may fall
+	between the peaks. With fewer than two distinct values, the median.
+	"""
+	values = np.asarray(values, dtype=float)
+	if len(np.unique(values)) < 2:
+		return float(np.median(values))
+	grid = np.linspace(values.min(), values.max(), n_grid)
+	return float(grid[np.argmax(gaussian_kde(values)(grid))])
+
+
+# statistics of a SASA series by name, for choosing a representative frame
+STATISTICS: dict[str, Callable[[np.ndarray], float]] = {
+	'median': np.median,
+	'mean': np.mean,
+	'mode': mode,
+	'q1': lambda values: np.percentile(values, 25),
+	'q3': lambda values: np.percentile(values, 75),
+	'min': np.min,
+	'max': np.max,
+	'mean+std': lambda values: np.mean(values) + np.std(values),
+	'mean-std': lambda values: np.mean(values) - np.std(values),
+}
+
+
+def _statistic(statistic: str | Callable[[np.ndarray], float] | float) -> tuple[Callable[[np.ndarray], float], str]:
+	"""A statistic (name, function or fixed value) as a function of the values, and its name."""
+	if isinstance(statistic, str):
+		if statistic not in STATISTICS:
+			raise ValueError(f"Unknown statistic {statistic!r}; known: {', '.join(STATISTICS)}, "
+			                 f"or give a function or a value.")
+		return STATISTICS[statistic], statistic
+	if callable(statistic):
+		name = getattr(statistic, '__name__', '')
+		return statistic, name if name and name != '<lambda>' else 'custom statistic'
+	value = float(statistic)
+	return (lambda values: value), f"value {value:g}"
+
+
+def closest_to(values: ArrayLike, statistic: str | Callable[[np.ndarray], float] | float = 'median') -> int:
+	"""
+	Index of the value closest to a statistic of the values, i.e. a representative frame.
+
+	Parameters
+	----------
+	values : array-like
+		(n,) values, e.g. the SASA of every frame
+	statistic : str, callable or float
+		name in :data:`STATISTICS` ('median', 'mean', 'mode', 'q1', 'q3', 'min', 'max',
+		'mean+std', 'mean-std'),
+		a function of the values (e.g. ``lambda v: np.percentile(v, 90)``), or a fixed value
+	"""
 	values = np.asarray(values)
-	return int(np.argmin(np.abs(values - np.median(values))))
+	function, _ = _statistic(statistic)
+	return int(np.argmin(np.abs(values - function(values))))
 
 
 def best_matching_frame(positions: ArrayLike, reference: ArrayLike) -> tuple[int, np.ndarray, float]:
@@ -197,7 +253,7 @@ def write_surface_pdb(fname: str | Path, surface: Surface) -> None:
 	_write_pdb(fname,
 	           positions=np.vstack([surface.positions, surface.dots]),
 	           names=np.concatenate([atoms.names, ['DOT'] * n_dots]),
-	           resnames=np.concatenate([atoms.resnames, ['DOT'] * n_dots]),
+	           resnames=np.concatenate([atoms.resnames, atoms.resnames[surface.owners]]),
 	           resids=np.concatenate([resids, resids[surface.owners]]),
 	           chains=['A'] * n_atoms + ['X'] * n_dots,
 	           record_types=['ATOM'] * n_atoms + ['HETATM'] * n_dots,
