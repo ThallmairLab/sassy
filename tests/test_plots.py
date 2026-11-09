@@ -176,21 +176,23 @@ def test_cli_plots_surface(tmp_path, monkeypatch):
     original = plots.save_plots
     monkeypatch.setattr(plots, 'save_plots', lambda *a, **kw: seen.append(kw['highlight']) or original(*a, **kw))
     run = ['-s', TPR, '-f', XTC, '-select', 'moltype GSH', '-ndots', '240', '-skip', '50', '-q',
-           '-o', str(tmp_path / 'x.xvg'), '-plots', str(tmp_path), '-surface', str(tmp_path / 's.pdb')]
+           '-o', str(tmp_path / 'x.xvg'), '-plots', str(tmp_path), '-surface', str(tmp_path / 'surf')]
     assert main(run) == 0
     sasa = np.loadtxt(tmp_path / 'x.xvg', comments=('#', '@'))
-    highlight = seen[-1]
+    assert (tmp_path / 'surf' / 'GSH_sasa.pdb').is_file()
+    highlight, = seen[-1] # one per type
     row = np.flatnonzero(np.isclose(sasa[:, 0], highlight.time))[0]
     assert highlight.series == 0 and highlight.sasa == pytest.approx(sasa[row, 1], abs=1e-3)
     assert highlight.label.startswith("surface frame ") and highlight.label.endswith(" (GSH1)")
     assert highlight.atoms is None # without -per-atom
     # per atom: the atoms of the molecule in the frame, one per panel
     assert main(run + ['-per-atom']) == 0
-    atoms = seen[-1].atoms
-    assert sorted(atoms) == list(range(36)) and sum(atoms.values()) == pytest.approx(seen[-1].sasa)
+    atoms = seen[-1][0].atoms
+    assert sorted(atoms) == list(range(36)) and sum(atoms.values()) == pytest.approx(seen[-1][0].sasa)
     # a frame that was not analysed: time only
     assert main(run + ['-surface-frame', '1']) == 0
-    assert seen[-1].sasa is None and seen[-1].series is None
+    assert seen[-1][0].sasa is None and seen[-1][0].series is None
     # whole: the selection
     assert main(run + ['-whole']) == 0
-    assert seen[-1].series == 0 and seen[-1].sasa is not None
+    assert seen[-1][0].series == 0 and seen[-1][0].sasa is not None
+    assert (tmp_path / 'surf' / 'selection_sasa.pdb').is_file()

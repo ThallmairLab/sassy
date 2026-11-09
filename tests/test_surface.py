@@ -78,7 +78,7 @@ def test_surface_area_and_frame(gsh_aa, tmp_path):
     surface = sasa.write_surface(tmp_path / 'x.pdb', return_surface=True)
     assert surface.frame == sasa.frames[closest_to(series)]
     assert surface.area == pytest.approx(series[closest_to(series)], rel=1e-6)
-    assert any(r.startswith('Representative frame: SASA closest to the median') for r in surface.remarks)
+    assert any(r.startswith('Representative frame: SASA (') and 'closest to the median' in r for r in surface.remarks)
     # other statistics: names, functions and fixed values
     for statistic in ('mean', 'mode', 'q1', 'q3', 'max', 'mean-std', np.min, lambda v: np.percentile(v, 75), 6.3):
         chosen = sasa.write_surface(tmp_path / 'x.pdb', statistic=statistic, return_surface=True)
@@ -173,11 +173,14 @@ def test_surface_pdb(gsh_aa, tmp_path):
 
 
 def test_cli_surface(tmp_path, capsys):
-    """-surface writes the dots; molecule by label, reference structure, and errors."""
-    out, dots = str(tmp_path / 'x.xvg'), tmp_path / 'dots.pdb'
+    """-surface writes DIR/<type>_sasa.pdb; one molecule by label, reference structure, and errors."""
+    out, surf = str(tmp_path / 'x.xvg'), tmp_path / 'surf'
+    dots = surf / 'GSH_sasa.pdb'
     run = ['-s', TPR, '-f', XTC, '-select', 'moltype GSH', '-ndots', '240', '-skip', '50', '-o', out]
-    assert main(run + ['-q', '-surface', str(dots), '-surface-molecule', 'GSH1']) == 0
-    assert 'HETATM' in dots.read_text()
+    assert main(run + ['-q', '-surface', str(surf)]) == 0
+    assert 'HETATM' in dots.read_text() and 'Representative molecule and frame: GSH1' in dots.read_text()
+    assert main(run + ['-q', '-surface', str(surf), '-surface-molecule', 'GSH1']) == 0
+    assert 'Representative frame: SASA' in (surf / 'GSH1_sasa.pdb').read_text()
 
     # the reference: frame 100, moved; the analysed frame 100 is found again
     universe = mda.Universe(TPR, XTC)
@@ -186,21 +189,31 @@ def test_cli_surface(tmp_path, capsys):
     gsh.translate([10, 0, 0])
     reference = str(tmp_path / 'ref.pdb')
     gsh.write(reference)
-    assert main(run + ['-surface', str(dots), '-surface-ref', reference]) == 0
+    assert main(run + ['-surface', str(surf), '-surface-ref', reference]) == 0
     assert 'frame 100 is closest to the reference' in capsys.readouterr().err
 
     for options, message in [(['-whole', '-surface-molecule', '0'], 'cannot be combined with -whole'),
                              (['-surface-molecule', 'SOL3'], 'no molecule of the selection'),
                              (['-surface-molecule', '5'], 'out of range'),
-                             (['-surface-frame', '9999'], 'out of range for 501 frame(s)')]:
-        assert main(run + ['-q', '-surface', str(dots)] + options) == 1
+                             (['-surface-frame', '9999'], 'out of range for 501 frame(s)'),
+                             (['-surface', 'dots.pdb'], 'takes a directory')]:
+        assert main(run + ['-q', '-surface', str(surf)] + options) == 1
         assert message in capsys.readouterr().err
-    assert main(run + ['-surface', str(dots), '-surface-stat', 'max']) == 0
+    assert main(run + ['-surface', str(surf), '-surface-stat', 'max']) == 0
     assert 'closest to the max' in capsys.readouterr().err
-    assert main(run + ['-q', '-surface', str(dots), '-surface-stat', '6.3']) == 0
+    assert main(run + ['-q', '-surface', str(surf), '-surface-stat', '6.3']) == 0
     assert 'closest to the value 6.3' in dots.read_text()
     for bad in (['-surface-stat', 'average'], ['-surface-stat', 'max', '-surface-frame', '0']):
         with pytest.raises(SystemExit):
-            main(run + ['-surface', str(dots)] + bad)
+            main(run + ['-surface', str(surf)] + bad)
     with pytest.raises(SystemExit): # frame or reference
-        main(run + ['-surface', str(dots), '-surface-frame', '0', '-surface-ref', reference])
+        main(run + ['-surface', str(surf), '-surface-frame', '0', '-surface-ref', reference])
+    # without a directory: the current one
+    import os
+    cwd = os.getcwd()
+    try:
+        os.chdir(tmp_path)
+        assert main(run + ['-q', '-surface']) == 0
+    finally:
+        os.chdir(cwd)
+    assert (tmp_path / 'GSH_sasa.pdb').is_file()

@@ -12,10 +12,10 @@ from MDAnalysis.lib.log import ProgressBar
 
 from .dots import unit_dots
 from .engine import _exposed_dots
-from .groups import molecule_index
+from .groups import molecule_index, molecule_labels, molecule_types
 from .radii import PROBE_RADIUS, atom_radii
 from .units import to_nm
-from .surface import SURFACE_DOTS, Surface, _statistic, closest_to, generate_surface
+from .surface import SURFACE_DOTS, Surface, _statistic, generate_surface
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +77,14 @@ class SASA:
 	sasa : np.ndarray
 		(n_atoms, n_frames) SASA (nm^2) of every atom of ``ag`` from the last :meth:`run`,
 		atoms in the order of ``ag``; None before a run and with ``save_atoms=False``
+	molecule_types : list of str
+		(n_molecules,) type of every molecule: its moltype (tpr), else named by its first
+		residue (see :func:`molecule_types`); 'selection' without ``per_molecule``
+	molecule_labels : list of str
+		(n_molecules,) label of every molecule: its type numbered within the type (GSH1,
+		GSH2, SOL1, ...); 'selection' without ``per_molecule``
+	types : dict of str to np.ndarray
+		molecule indices of every type, in the order of first appearance
 	molecule_sasa : np.ndarray
 		(n_molecules, n_frames) SASA (nm^2) of every molecule from the last :meth:`run`
 	total_sasa : np.ndarray
@@ -109,6 +117,13 @@ class SASA:
 		molecules = molecule_index(ag) if per_molecule else np.zeros(ag.n_atoms, dtype=int)
 		self.n_molecules = int(molecules.max()) + 1 if len(molecules) else 0
 		self._molecule_of_atom = molecules
+		# type and label of every molecule, and the molecules of every type (in order of appearance)
+		self.molecule_types = molecule_types(ag, molecules) if per_molecule else ['selection'] * self.n_molecules
+		self.molecule_labels = molecule_labels(self.molecule_types) if per_molecule else self.molecule_types[:]
+		self.types = {}
+		for i, name in enumerate(self.molecule_types):
+			self.types.setdefault(name, []).append(i)
+		self.types = {name: np.array(indices) for name, indices in self.types.items()}
 		active = np.flatnonzero(radii > 0) # select only atoms with a radius
 		self._active = active # indices in ag of the atoms with a radius
 		self._indices = ag.indices[active]
@@ -337,16 +352,42 @@ class SASA:
 		atoms = self.sasa[self._ag_indices(selection)]
 		return atoms if per_atom else atoms.sum(axis=0)
 
-	def get_molecule_sasa(self, index: int | ArrayLike | None = None) -> np.ndarray:
+	def molecule_number(self, molecule: int | str) -> int:
+		"""
+		Index (0, 1, ...) of a molecule given by its index (negative counts from the end) or
+		its label (e.g. 'GSH2', see :attr:`molecule_labels`).
+		"""
+		if isinstance(molecule, str):
+			if molecule not in self.molecule_labels:
+				raise KeyError(f"No molecule {molecule!r}; labels: {', '.join(self.molecule_labels[:10])}"
+				               f"{', ...' if self.n_molecules > 10 else ''}.")
+			return self.molecule_labels.index(molecule)
+		if not -self.n_molecules <= molecule < self.n_molecules:
+			raise IndexError(f"Molecule index {molecule} out of range for {self.n_molecules} molecule(s).")
+		return int(molecule) % self.n_molecules
+
+	def get_type_sasa(self, name: str, total: bool = False) -> np.ndarray:
+		"""
+		SASA (nm^2) over time of the molecules of one type (see :attr:`types`), from the
+		last SASA.run(): (n_molecules_of_type, n_frames), or with ``total`` their sum (n_frames,).
+		"""
+		self._check_run()
+		if name not in self.types:
+			raise KeyError(f"No molecule type {name!r}; types: {', '.join(self.types)}.")
+		values = self.molecule_sasa[self.types[name]]
+		return values.sum(axis=0) if total else values
+
+	def get_molecule_sasa(self, index: int | str | ArrayLike | None = None) -> np.ndarray:
 		"""
 		SASA (nm^2) over time of molecules, by molecule index (0, 1, ... in the order
-		of :func:`split_molecules`), from the last SASA.run().
+		of :func:`split_molecules`) or label (see :attr:`molecule_labels`), from the last
+		SASA.run().
 
 		Parameters
 		----------
-		index : int or array-like of int, optional
-			molecule index or indices (negative indices count from the end);
-			default all molecules
+		index : int, str or array-like of int, optional
+			molecule index or indices (negative indices count from the end), or a label
+			(e.g. 'GSH2'); default all molecules
 
 		Returns
 		-------
@@ -357,10 +398,13 @@ class SASA:
 		--------
 		>>> sasa.get_molecule_sasa(0)         # first molecule
 		>>> sasa.get_molecule_sasa([0, 2])    # first and third molecule
+		>>> sasa.get_molecule_sasa('GSH2')    # by label
 		"""
 		self._check_run()
 		if index is None:
 			return self.molecule_sasa
+		if isinstance(index, str):
+			return self.molecule_sasa[self.molecule_number(index)]
 		index = np.asarray(index)
 		if not np.issubdtype(index.dtype, np.integer):
 			raise TypeError(f"Molecule indices must be integers, got {index.dtype}.")
@@ -370,16 +414,14 @@ class SASA:
 
 
 	# SASA surface visualization
-	def molecule_atoms(self, molecule: int | None = None) -> mda.AtomGroup:
+	def molecule_atoms(self, molecule: int | str | None = None) -> mda.AtomGroup:
 		"""
 		Atoms of a molecule (index as in :meth:`get_molecule_sasa`, negative counts from
-		the end); all atoms of ``ag`` for None.
+		the end, or label); all atoms of ``ag`` for None.
 		"""
 		if molecule is None:
 			return self.ag
-		if not -self.n_molecules <= molecule < self.n_molecules:
-			raise IndexError(f"Molecule index {molecule} out of range for {self.n_molecules} molecule(s).")
-		return self.ag[self._molecule_of_atom == molecule % self.n_molecules]
+		return self.ag[self._molecule_of_atom == self.molecule_number(molecule)]
 
 	def _molecule_remark(self, atoms: mda.AtomGroup, molecule: int) -> str:
 		"""REMARK record naming the atoms of a written surface: which molecule, or the whole AtomGroup."""
@@ -392,10 +434,53 @@ class SASA:
 			return f"Whole selection as one body ({described})"
 		return f"Molecule {molecule % self.n_molecules} of {self.n_molecules} ({described}), on its own"
 
-	def write_surface(self, fname: str, frame: int | None = None, molecule: int = 0,
+	def representative(self, molecule_type: str, statistic: str | Callable[[np.ndarray], float] | float = 'median',
+	                   frame: int | None = None) -> tuple[int, int, float]:
+		"""
+		A representative molecule of a type and frame: the statistic is taken over the SASA
+		distribution of that type only (all its molecules in all analysed frames of the last
+		:meth:`run`), and the (molecule, frame) whose SASA is closest to it is chosen.
+
+		Parameters
+		----------
+		molecule_type : str
+			type (see :attr:`types`)
+		statistic : str, callable or float
+			see :meth:`write_surface`
+		frame : int, optional
+			fixed trajectory frame: only the molecule is chosen (the first of the type if the
+			frame was not analysed)
+
+		Returns
+		-------
+		molecule : int
+			molecule index
+		frame : int
+			trajectory frame
+		target : float
+			the statistic (nm^2) of the type's distribution
+		"""
+		self._check_run()
+		if molecule_type not in self.types:
+			raise KeyError(f"No molecule type {molecule_type!r}; types: {', '.join(self.types)}.")
+		function, _ = _statistic(statistic)
+		molecules = self.types[molecule_type]
+		values = self.molecule_sasa[molecules] # (n_molecules_of_type, n_frames)
+		target = float(function(values.ravel()))
+		if frame is None:
+			k, column = np.unravel_index(np.argmin(np.abs(values - target)), values.shape)
+			return int(molecules[k]), int(self.frames[column]), target
+		frame = int(frame) % self.ag.universe.trajectory.n_frames
+		analysed = np.flatnonzero(self.frames == frame)
+		if not len(analysed):
+			return int(molecules[0]), frame, target
+		return int(molecules[np.argmin(np.abs(values[:, analysed[0]] - target))]), frame, target
+
+	def write_surface(self, fname: str, frame: int | None = None, molecule: int | str = 0,
 	                  reference: ArrayLike | mda.AtomGroup | None = None,
 	                  ndots: int = SURFACE_DOTS, return_surface: bool = False,
-	                  statistic: str | Callable[[np.ndarray], float] | float = 'median') -> Surface | None:
+	                  statistic: str | Callable[[np.ndarray], float] | float = 'median',
+	                  molecule_type: str | None = None) -> Surface | None:
 		"""
 		Write the structure and its solvent accessible surface dots (Connolly-style dot
 		surface) in one frame to a PDB file, with the radii and probe of this SASA; see
@@ -404,18 +489,26 @@ class SASA:
 		The surface follows the overlap mode of the SASA: with ``per_molecule`` it is the
 		surface of a single molecule (on its own), else that of the whole AtomGroup.
 
+		Statistics are taken over the SASA distribution of the molecule's type only (all
+		molecules of the type in all analysed frames; whole mode: the total), so every type
+		has its own median, mean, ...
+
 		Parameters
 		----------
 		fname : str
 			PDB file to write
 		frame : int, optional
-			trajectory frame (negative counts from the end); default the frame of the last
-			:meth:`run` whose SASA (of the molecule, or of ``ag``) is closest to ``statistic``
-			(by default the median), i.e. a representative structure
-		molecule : int
+			trajectory frame (negative counts from the end); default the analysed frame of the
+			molecule whose SASA is closest to ``statistic`` (by default the median) of its
+			type's distribution, i.e. a representative structure
+		molecule : int or str
 			with ``per_molecule``: index of the molecule (as in :meth:`get_molecule_sasa`,
-			negative counts from the end), default the first; without: the whole AtomGroup
-			is the only molecule (0)
+			negative counts from the end) or its label (e.g. 'GSH2'), default the first;
+			without: the whole AtomGroup is the only molecule (0)
+		molecule_type : str, optional
+			instead of ``molecule``: a type (see :attr:`types`); its representative molecule
+			and frame are used, see :meth:`representative` (with ``frame``: the molecule
+			closest to the statistic in that frame; with ``reference``: its first molecule)
 		reference : np.ndarray or MDAnalysis.AtomGroup, optional
 			reference structure, (n_atoms, 3) positions (nm) or an AtomGroup with as many
 			atoms as the surface (in the same order, e.g. a mapped atomistic structure for
@@ -426,10 +519,10 @@ class SASA:
 			minimum number of dots per atom (fewer than for the SASA, as dots are for viewing)
 		statistic : str, callable or float
 			without ``frame`` and ``reference``: the representative frame is the one whose SASA
-			is closest to this statistic of the SASA series: a name ('median', 'mean', 'mode'
-			(most probable SASA), 'q1', 'q3' (quartiles), 'min', 'max', 'mean+std', 'mean-std',
-			see :data:`STATISTICS`), a function of the (n_frames,)
-			SASA series (e.g. ``lambda sasa: np.percentile(sasa, 90)``), or a fixed SASA (nm^2)
+			is closest to this statistic of the type's SASA distribution: a name ('median',
+			'mean', 'mode' (most probable SASA), 'q1', 'q3' (quartiles), 'min', 'max',
+			'mean+std', 'mean-std', see :data:`STATISTICS`), a function of the SASA values
+			(e.g. ``lambda sasa: np.percentile(sasa, 90)``), or a fixed SASA (nm^2)
 		return_surface : bool
 			return the written :class:`Surface` (structure, dots, area in nm^2 from the
 			dots, frame, ...) instead of None
@@ -439,22 +532,28 @@ class SASA:
 		Surface or None
 			the written surface with ``return_surface``, else None
 		"""
-		if not self.per_molecule and molecule not in (0, -1):
-			raise ValueError(f"Molecule {molecule}: without per_molecule the surface is that of the whole "
-			                 f"AtomGroup (molecule 0).")
-		atoms = self.molecule_atoms(molecule) # whole mode: all of ag
 		function, name = _statistic(statistic) # checked also when not used
 		chosen = None # remark on how the frame was chosen
-		if frame is None and reference is None:
-			self._check_run()
-			series = self.get_molecule_sasa(molecule) # whole mode: the total
-			target = float(function(series))
-			best = closest_to(series, function)
-			frame = int(self.frames[best])
-			chosen = (f"Representative frame: SASA closest to the {name} ({target:.3f} nm^2) of "
-			          f"{len(series)} analysed frame(s)")
-			logger.info("frame %d has the SASA (%.3f nm^2) closest to the %s (%.3f nm^2)", frame,
-			            series[best], name, target)
+		if molecule_type is not None:
+			if molecule_type not in self.types:
+				raise KeyError(f"No molecule type {molecule_type!r}; types: {', '.join(self.types)}.")
+			if reference is not None:
+				molecule = int(self.types[molecule_type][0])
+			else:
+				molecule, frame, target = self.representative(molecule_type, function, frame)
+				chosen = self._chosen_remark(molecule, frame, target, name, molecule_choice=True)
+		else:
+			if not self.per_molecule and molecule not in (0, -1, 'selection'):
+				raise ValueError(f"Molecule {molecule}: without per_molecule the surface is that of the whole "
+				                 f"AtomGroup (molecule 0).")
+			molecule = self.molecule_number(molecule)
+			if frame is None and reference is None:
+				self._check_run()
+				target = float(function(self.get_type_sasa(self.molecule_types[molecule]).ravel()))
+				series = self.get_molecule_sasa(molecule)
+				frame = int(self.frames[np.argmin(np.abs(series - target))])
+				chosen = self._chosen_remark(molecule, frame, target, name)
+		atoms = self.molecule_atoms(molecule) # whole mode: all of ag
 		indices = self._lookup[atoms.indices]
 		result = generate_surface(atoms, radii=self.radii[indices] if self._custom_radii else None,
 		                          probe=self.probe, block=self._molecule_of_atom[indices], frame=frame,
@@ -462,7 +561,25 @@ class SASA:
 		result.remarks.insert(2, self._molecule_remark(atoms, molecule)) # after the frame
 		if chosen is not None:
 			result.remarks.insert(3, chosen)
+		result.molecule = molecule
 		result.write(fname)
-		logger.info("wrote the surface of frame %d (%d atoms, %d dots, SASA %.3f nm^2) to %s",
-		            result.frame, result.atoms.n_atoms, len(result.dots), result.area, fname)
+		logger.info("wrote the surface of %s in frame %d (%d atoms, %d dots, SASA %.3f nm^2) to %s",
+		            self.molecule_labels[molecule], result.frame, result.atoms.n_atoms, len(result.dots),
+		            result.area, fname)
 		return result if return_surface else None
+
+	def _chosen_remark(self, molecule: int, frame: int, target: float, name: str,
+	                   molecule_choice: bool = False) -> str:
+		"""REMARK on how the frame (and molecule) of a surface was chosen; also logged."""
+		molecule_type = self.molecule_types[molecule]
+		n_molecules = len(self.types[molecule_type])
+		analysed = np.flatnonzero(self.frames == frame)
+		sasa = f"{self.molecule_sasa[molecule, analysed[0]]:.3f} nm^2" if len(analysed) else "not analysed"
+		pool = (f"{n_molecules} {molecule_type} molecule(s) x {len(self.frames)} analysed frame(s)"
+		        if self.per_molecule else f"{len(self.frames)} analysed frame(s)")
+		what = (f"Representative molecule and frame: {self.molecule_labels[molecule]} in frame {frame}"
+		        if molecule_choice else "Representative frame")
+		logger.info("%s %s in frame %d: SASA %s, closest to the %s (%.3f nm^2) of %s",
+		            'representative' if molecule_choice else 'surface of', self.molecule_labels[molecule], frame,
+		            sasa, name, target, pool)
+		return f"{what}: SASA ({sasa}) closest to the {name} ({target:.3f} nm^2) of {pool}"

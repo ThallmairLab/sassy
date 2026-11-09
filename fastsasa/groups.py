@@ -8,24 +8,52 @@ import MDAnalysis as mda
 logger = logging.getLogger(__name__)
 
 
+def _rank(keys: np.ndarray) -> np.ndarray:
+	'''0, 1, ... for the distinct keys in the order of their first appearance.'''
+	_, first, inverse = np.unique(keys, return_index=True, return_inverse=True)
+	rank = np.empty(len(first), dtype=int)
+	rank[np.argsort(first)] = np.arange(len(first))
+	return rank[inverse.ravel()]
+
+
+def _has_bonds(ag: mda.AtomGroup) -> bool:
+	'''Whether the topology has bonds (e.g. tpr, psf, PDB with CONECT records).'''
+	try:
+		return hasattr(ag.universe.atoms, 'bonds') and len(ag.universe.bonds) > 0
+	except Exception: # e.g. no bond information after all
+		return False
+
+
 def molecule_index(ag: mda.AtomGroup) -> np.ndarray:
 	'''
-	Molecule index of ever atom in ag in the order in which they appear.
+	Molecule index of every atom in ag, 0, 1, ... in the order in which the molecules appear.
 
-	Molecules are taken from the molnums of the topology (e.g. tpr). Without
-	molnums, ``ag`` is taken as consecutive copies of one molecule: the shortest
-	repeating unit of atoms with the same atom names, residue names and resids
-	(up to an offset per copy) in the same order, see :func:`copy_length`. If
-	nothing repeats, ``ag`` is a single molecule. Without atom
-	names, every residue is a molecule.
+	The molecules are taken, in this order of preference, from
+
+	1. the molnums of the topology (e.g. tpr),
+	2. the bonds of the topology (e.g. psf, PDB with CONECT records): every set of bonded
+	   atoms (fragment) is a molecule, so any mix of molecules is split,
+	3. without atom names: the residues,
+	4. else ``ag`` is taken as consecutive copies of one molecule: the shortest repeating
+	   unit of atoms with the same atom names, residue names and resids (up to an offset
+	   per copy) in the same order, see :func:`copy_length`. If nothing repeats, ``ag`` is
+	   a single molecule, with a warning.
+
+	Bonds are not guessed: guessing is slow for large systems and unreliable for
+	coarse-grained models (guess them in MDAnalysis first if wanted, e.g.
+	``universe.guess_TopologyAttrs(to_guess=['bonds'])``).
 	'''
-	if hasattr(ag.atoms, 'molnums') or not hasattr(ag.atoms, 'names'):
-		logger.debug("molecules from the %s of the topology", 'molnums' if hasattr(ag.atoms, 'molnums') else 'residues')
-		keys = ag.molnums if hasattr(ag.atoms, 'molnums') else ag.resindices
-		_, first, inverse = np.unique(keys, return_index=True, return_inverse=True)
-		rank = np.empty(len(first), dtype=int)
-		rank[np.argsort(first)] = np.arange(len(first))
-		return rank[inverse.ravel()]
+	if ag.n_atoms == 0:
+		return np.zeros(0, dtype=int)
+	if hasattr(ag.atoms, 'molnums'):
+		logger.debug("molecules from the molnums of the topology")
+		return _rank(ag.molnums)
+	if _has_bonds(ag):
+		logger.debug("molecules from the bonds of the topology (fragments)")
+		return _rank(ag.fragindices)
+	if not hasattr(ag.atoms, 'names'):
+		logger.debug("molecules from the residues of the topology")
+		return _rank(ag.resindices)
 	return np.arange(ag.n_atoms) // max(1, copy_length(ag))
 
 def copy_length(ag: mda.AtomGroup) -> int:
@@ -56,8 +84,9 @@ def copy_length(ag: mda.AtomGroup) -> int:
 		if (relative == relative[0]).all():
 			logger.debug("molecules from repeating units: %d copies of %d atoms", copies, length)
 			return length
-	logger.warning("could not find a repeating unit in %d atoms; treating the whole AtomGroup as one molecule "
-	               "(give a topology with molecules, e.g. a tpr, or select one molecule type)", n)
+	logger.warning("no molecules found: the topology has neither molecules (molnums, e.g. tpr) nor bonds, and "
+	               "%d atoms are no consecutive copies of one molecule; treating the selection as one molecule "
+	               "(use a tpr or a topology with bonds, select one molecule type, or use whole mode)", n)
 	return n
 
 def split_molecules(ag: mda.AtomGroup) -> list[mda.AtomGroup]:
@@ -68,18 +97,56 @@ def split_molecules(ag: mda.AtomGroup) -> list[mda.AtomGroup]:
 	molecules = molecule_index(ag)
 	return [ag[molecules == i] for i in range(molecules.max() + 1 if len(molecules) else 0)]
 
+def molecule_types(ag: mda.AtomGroup, molecules: np.ndarray | None = None) -> list[str]:
+	'''
+	Type name of every molecule (see :func:`molecule_index`): its moltype (tpr), else
+	the residue name of its first atom, for molecules with the same atom names and residue
+	names in the same order. Different molecules starting with the same residue name are
+	told apart by a suffix (e.g. ALA, ALA_2).
+
+	Parameters
+	----------
+	ag : MDAnalysis.AtomGroup
+	molecules : np.ndarray, optional
+		molecule index of every atom; default :func:`molecule_index`
+
+	Returns
+	-------
+	list of str
+		(n_molecules,) type names
+	'''
+	molecules = molecule_index(ag) if molecules is None else np.asarray(molecules)
+	n = int(molecules.max()) + 1 if len(molecules) else 0
+	if hasattr(ag.atoms, 'moltypes'):
+		first = np.unique(molecules, return_index=True)[1]
+		return [str(name) for name in ag.moltypes[first]]
+	attrs = [attr for attr in ('names', 'resnames') if hasattr(ag.atoms, attr)]
+	names, signatures, bases = [], {}, {} # signature (names, resnames) -> type name; base -> count
+	for i in range(n):
+		atoms = ag[molecules == i]
+		signature = tuple(tuple(getattr(atoms, attr)) for attr in attrs)
+		if signature not in signatures:
+			base = str(atoms.resnames[0]) if hasattr(atoms, 'resnames') else 'molecule'
+			bases[base] = bases.get(base, 0) + 1
+			signatures[signature] = base if bases[base] == 1 else f"{base}_{bases[base]}"
+		names.append(signatures[signature])
+	return names
+
+
+def molecule_labels(types: list[str]) -> list[str]:
+	'''
+	Label of every molecule: its type numbered from 1 within the type, e.g.
+	['GSH', 'GSH', 'SOL'] -> ['GSH1', 'GSH2', 'SOL1'].
+	'''
+	counts, labels = {}, []
+	for name in types:
+		counts[name] = counts.get(name, 0) + 1
+		labels.append(f"{name}{counts[name]}")
+	return labels
+
+
 def n_molecule_types(ag: mda.AtomGroup) -> int:
 	'''
-	Number of different molecule types in ``ag``: by the moltypes of the topology
-	(tpr), else by the sequence of atom names and residue names of every
-	molecule (see :func:`molecule_index`).
+	Number of different molecule types in ``ag`` (see :func:`molecule_types`).
 	'''
-	if ag.n_atoms == 0:
-		return 0
-	if hasattr(ag.atoms, 'moltypes'):
-		return len(np.unique(ag.moltypes))
-	molecules = molecule_index(ag)
-	attrs = [attr for attr in ('names', 'resnames') if hasattr(ag.atoms, attr)]
-	types = {tuple(tuple(getattr(ag[molecules == i], attr)) for attr in attrs)
-	         for i in range(molecules.max() + 1)}
-	return len(types)
+	return len(set(molecule_types(ag))) if ag.n_atoms else 0

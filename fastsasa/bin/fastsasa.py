@@ -14,7 +14,7 @@ import numpy as np
 import MDAnalysis as mda
 
 from .. import __version__
-from ..groups import n_molecule_types, split_molecules
+from ..groups import n_molecule_types
 from ..radii import PROBE_RADIUS
 from ..sasa import N_DOTS, SASA
 from ..surface import STATISTICS, SURFACE_DOTS
@@ -114,21 +114,25 @@ def parser() -> argparse.ArgumentParser:
 
 	surf = p.add_argument_group('surface', 'structure and solvent accessible surface dots (Connolly-style '
 	                            'dot surface) of one frame as PDB: atoms as ATOM, dots as HETATM records named DOT with the residue of their atom')
-	surf.add_argument('-surface', default=None, metavar='FILE.pdb', help='write the surface dots to this PDB file')
+	surf.add_argument('-surface', nargs='?', const='.', default=None, metavar='DIR',
+	                  help='write the surface of a representative molecule of every molecule type to DIR/<type>_sasa.pdb '
+	                       '(e.g. GSH_sasa.pdb; the current directory if no DIR is given); with -whole that of the '
+	                       'whole selection (selection_sasa.pdb)')
 	surf.add_argument('-surface-molecule', default=None, metavar='MOLECULE',
-	                  help='molecule of the surface: index (0 = first) or column label (e.g. GSH2); default the first '
-	                       'molecule (with -whole the surface is that of the whole selection)')
+	                  help='instead: only the surface of this molecule, by index (0 = first) or column label (e.g. '
+	                       'GSH2), written to <label>_sasa.pdb')
 	surface_frame = surf.add_mutually_exclusive_group()
 	surface_frame.add_argument('-surface-frame', type=int, default=None, metavar='FRAME',
-	                           help='trajectory frame of the surface (default: the analysed frame whose SASA is '
-	                                'closest to the median, see surface-stat)')
+	                           help='trajectory frame of the surfaces (of every type the molecule whose SASA in this '
+	                                'frame is closest to the median of the type); default see -surface-stat')
 	surface_frame.add_argument('-surface-ref', default=None, metavar='FILE',
 	                           help='reference structure (pdb, gro, ...; same atoms in the same order, e.g. a mapped '
 	                                'atomistic structure for a CG model): use the analysed frame with the lowest RMSD '
-	                                'to it, superposed onto it')
+	                                'to it, superposed onto it (one molecule type, or with -surface-molecule)')
 	surface_frame.add_argument('-surface-stat', type=_statistic, default='median', metavar='STAT',
-	                           help=f"use the analysed frame whose SASA is closest to this statistic of the SASA "
-	                                f"series ({', '.join(STATISTICS)}) or to this SASA (nm^2)")
+	                           help=f"of every type use the molecule and analysed frame whose SASA is closest to this "
+	                                f"statistic of the SASA distribution of the type (all its molecules and frames; "
+	                                f"{', '.join(STATISTICS)}; default median) or to this SASA (nm^2)")
 	surf.add_argument('-surface-ndots', type=int, default=SURFACE_DOTS, help='minimum number of dots per atom of the surface')
 
 	perf = p.add_argument_group('performance')
@@ -138,20 +142,6 @@ def parser() -> argparse.ArgumentParser:
 	log.add_argument('-v', action='store_true', help='verbose: debug messages (molecules, radii, timing)', dest='verbose')
 	log.add_argument('-q', action='store_true', help='quiet: only warnings and errors, no progress bar', dest='quiet')
 	return p
-
-
-def _molecule_labels(ag) -> list[str]:
-	"""
-	Label of every molecule (order of :func:`split_molecules`): its moltype (tpr), else
-	the residue name of its first residue, numbered from 1 within that name, e.g. GSH1, GSH2, SOL1.
-	"""
-	labels, counts = [], {}
-	for molecule in split_molecules(ag):
-		name = molecule.moltypes[0] if hasattr(molecule, 'moltypes') else (
-		       molecule.resnames[0] if hasattr(molecule, 'resnames') else 'molecule')
-		counts[name] = counts.get(name, 0) + 1
-		labels.append(f"{name}{counts[name]}")
-	return labels
 
 
 def _columns(sasa: SASA, args: argparse.Namespace) -> tuple[np.ndarray, list[str]]:
@@ -170,7 +160,7 @@ def _columns(sasa: SASA, args: argparse.Namespace) -> tuple[np.ndarray, list[str
 		return np.array(columns).reshape(1, len(sasa.frames)), labels
 	else:
 		columns.extend(sasa.get_molecule_sasa())
-		labels.extend(_molecule_labels(sasa.ag))
+		labels.extend(sasa.molecule_labels)
 	if args.total:
 		columns.append(sasa.get_sasa())
 		labels.append('total')
@@ -178,23 +168,35 @@ def _columns(sasa: SASA, args: argparse.Namespace) -> tuple[np.ndarray, list[str
 	return np.array(columns).reshape(len(columns), n_frames), labels
 
 
-def _surface_options(args: argparse.Namespace, sasa: SASA) -> dict | bool:
+def _surface_file(directory: str, name: str) -> Path:
+	"""DIR/<name>_sasa.pdb, with characters that do not belong in file names replaced."""
+	safe = ''.join(c if c.isalnum() or c in '-_.+' else '_' for c in name)
+	return Path(directory) / f"{safe}_sasa.pdb"
+
+
+def _surface_options(args: argparse.Namespace, sasa: SASA) -> list[dict] | bool:
 	"""
-	Molecule, frame and reference of -surface as keyword arguments of :meth:`SASA.write_surface`,
-	checked before the (long) calculation; False (after logging the error) if they are invalid.
+	The surfaces of -surface: one per molecule type (its representative molecule), or the
+	molecule of -surface-molecule, as keyword arguments of :meth:`SASA.write_surface` with
+	``fname``; checked before the (long) calculation. False (after logging the error) if invalid.
 	"""
-	molecule = 0 # per molecule: the first; -whole: the whole selection
+	if Path(args.surface).suffix.lower() == '.pdb':
+		logger.error("-surface takes a directory (the surfaces are written to DIR/<type>_sasa.pdb), got %s",
+		             args.surface)
+		return False
+	common = {'frame': args.surface_frame, 'statistic': args.surface_stat, 'ndots': args.surface_ndots}
 	if args.surface_molecule is not None:
 		if args.whole:
 			logger.error("-surface-molecule cannot be combined with -whole (the selection is one body)")
 			return False
-		labels = _molecule_labels(sasa.ag)
+		labels = sasa.molecule_labels
 		text = args.surface_molecule
 		if text.lstrip('-').isdigit():
 			molecule = int(text)
 			if not -len(labels) <= molecule < len(labels):
 				logger.error("-surface-molecule %d out of range for %d molecule(s)", molecule, len(labels))
 				return False
+			molecule %= len(labels)
 		elif text in labels:
 			molecule = labels.index(text)
 		else:
@@ -202,38 +204,48 @@ def _surface_options(args: argparse.Namespace, sasa: SASA) -> dict | bool:
 			             ', '.join(labels[:5]) + (', ...' if len(labels) > 5 else ''))
 			return False
 		logger.debug("surface of molecule %d (%s)", molecule, labels[molecule])
+		jobs = [dict(common, molecule=molecule, fname=_surface_file(args.surface, labels[molecule]))]
+	else:
+		jobs = [dict(common, molecule_type=name, fname=_surface_file(args.surface, name)) for name in sasa.types]
 
-	reference = None
 	if args.surface_ref is not None:
+		if len(jobs) > 1:
+			logger.error("-surface-ref needs a single surface: the selection holds %d molecule types (%s); "
+			             "give -surface-molecule", len(jobs), ', '.join(sasa.types))
+			return False
 		reference = mda.Universe(args.surface_ref).atoms
+		job = jobs[0]
+		molecule = job['molecule'] if 'molecule' in job else int(sasa.types[job['molecule_type']][0])
 		n_atoms = sasa.molecule_atoms(molecule).n_atoms
 		if reference.n_atoms != n_atoms:
 			logger.error("the reference structure %s has %d atoms, but the surface (%s) has %d", args.surface_ref,
-			             reference.n_atoms, 'whole selection' if args.whole else f'molecule {molecule}', n_atoms)
+			             reference.n_atoms, 'whole selection' if args.whole else sasa.molecule_labels[molecule],
+			             n_atoms)
 			return False
+		job['reference'] = reference
 	n_frames = sasa.ag.universe.trajectory.n_frames
 	if args.surface_frame is not None and not -n_frames <= args.surface_frame < n_frames:
 		logger.error("-surface-frame %d out of range for %d frame(s)", args.surface_frame, n_frames)
 		return False
-	return {'molecule': molecule, 'frame': args.surface_frame, 'reference': reference, 'statistic': args.surface_stat}
+	return jobs
 
 
-def _highlight(sasa: SASA, args: argparse.Namespace, surface, molecule: int):
+def _highlight(sasa: SASA, args: argparse.Namespace, surface):
 	"""
 	The frame of the surface for the plots: its time, and, if the frame was analysed, the
 	SASA of its molecule (of the selection with -whole) and with -per-atom of its atoms.
 	Groups are no molecules: time only.
 	"""
 	from ..plots import Highlight, atom_sasa_at
+	series = surface.molecule
 	label = f"surface frame {surface.frame}"
+	if not args.whole:
+		label += f" ({sasa.molecule_labels[series]})"
 	analysed = np.flatnonzero(sasa.frames == surface.frame)
 	if args.group or not len(analysed):
 		if not len(analysed):
 			logger.debug("surface frame %d was not analysed: marked in the time plots only", surface.frame)
 		return Highlight(time=surface.time, label=label)
-	series = molecule % sasa.n_molecules
-	if not args.whole:
-		label += f" ({_molecule_labels(sasa.ag)[series]})"
 	return Highlight(time=surface.time, sasa=float(sasa.get_molecule_sasa(series)[analysed[0]]),
 	                 series=series, label=label,
 	                 atoms=atom_sasa_at(sasa, series, surface.frame) if args.per_atom else None)
@@ -306,15 +318,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 		_write_xvg(output, sasa.times, columns, labels, command)
 	logger.info("wrote %d column(s) x %d frame(s) to %s", len(labels), len(sasa.frames), output)
 
-	status, highlight = 0, None
+	status, highlights = 0, []
 	if surface is not None:
-		try:
-			result = sasa.write_surface(args.surface, ndots=args.surface_ndots, return_surface=True, **surface)
-		except (IndexError, ValueError) as error: # e.g. frame out of range
-			logger.error("surface: %s", error)
-			status = 1 # the plots are still written
-		else:
-			highlight = _highlight(sasa, args, result, surface['molecule'])
+		Path(args.surface).mkdir(parents=True, exist_ok=True)
+		for job in surface:
+			try:
+				result = sasa.write_surface(return_surface=True, **job)
+			except (IndexError, KeyError, ValueError) as error: # e.g. frame out of range
+				logger.error("surface %s: %s", job['fname'], error)
+				status = 1 # the other surfaces and the plots are still written
+			else:
+				highlights.append(_highlight(sasa, args, result))
 
 	if args.plots is not None:
 		from ..plots import pooled_atom_sasa, save_plots
@@ -325,10 +339,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 		elif args.whole:
 			values, series_labels = sasa.get_sasa()[None], [args.select]
 		else: # molecules, also with -per-atom: the same plots as without
-			values, series_labels = sasa.get_molecule_sasa(), _molecule_labels(sasa.ag)
+			values, series_labels = sasa.get_molecule_sasa(), sasa.molecule_labels
 		atom_labels, atoms = pooled_atom_sasa(sasa) if args.per_atom else (None, None)
 		save_plots(args.plots, sasa.times, values, series_labels, total=sasa.get_sasa(), kind=kind,
-		           atoms=atoms, atom_labels=atom_labels, highlight=highlight)
+		           atoms=atoms, atom_labels=atom_labels, highlight=highlights,
+		           types=sasa.molecule_types if kind == 'molecule' else None)
 	return status
 
 

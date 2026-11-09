@@ -51,6 +51,8 @@ class Surface:
 		onto, None without a reference
 	remarks : list of str
 		REMARK records of the written PDB file
+	molecule : int or None
+		index of the molecule in the :class:`SASA` (from :meth:`SASA.write_surface`), else None
 	"""
 	atoms: mda.AtomGroup
 	positions: np.ndarray
@@ -61,6 +63,7 @@ class Surface:
 	time: float
 	rmsd: float | None = None
 	remarks: list[str] | None = None
+	molecule: int | None = None
 
 	def write(self, fname: str | Path) -> None:
 		"""
