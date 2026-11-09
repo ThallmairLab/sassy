@@ -15,6 +15,8 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import ArrayLike
 
+from .groups import atom_label
+
 logger = logging.getLogger(__name__)
 
 # style (static PNG, light surface): categorical hues in fixed order, never cycled;
@@ -418,9 +420,9 @@ def plot_distribution_panels(values: ArrayLike | list[ArrayLike], fname: str | P
 	return _save(fig, fname)
 
 
-def _with_radius(sasa, atoms) -> np.ndarray:
-	"""Mask of the atoms with a radius (with SASA; no dummy beads, virtual sites)."""
-	return sasa.radii[sasa._lookup[atoms.indices]] > 0
+def _with_radius(sasa, molecule: int) -> np.ndarray:
+	"""Mask of the atoms of a molecule with a radius (with SASA; no dummy beads, virtual sites)."""
+	return sasa.radii[sasa._members[molecule]] > 0
 
 
 def pooled_atom_sasa(sasa) -> tuple[list[str], list[np.ndarray]]:
@@ -445,15 +447,15 @@ def pooled_atom_sasa(sasa) -> tuple[list[str], list[np.ndarray]]:
 	pooled : list of np.ndarray
 		(n_molecules_of_type * n_frames,) SASA (nm^2) of every atom of every type
 	"""
+	sasa._check_run(atoms=True)
 	labels, pooled = [], []
 	for name, molecules in sasa.types.items():
-		atoms = sasa.molecule_atoms(molecules[0])
+		members = np.stack([sasa._members[i] for i in molecules], axis=1) # (n_atoms, n_molecules) indices in ag
 		prefix = f"{name} " if len(sasa.types) > 1 else ''
-		kept = _with_radius(sasa, atoms) # the same for all molecules of the type
-		stacked = np.stack([sasa.get_sasa(sasa.molecule_atoms(i), per_atom=True) for i in molecules],
-		                   axis=1) # (n_atoms, n_molecules, n_frames)
-		for atom, series in zip(atoms[kept], stacked[kept]):
-			labels.append(f"{prefix}{atom.resname}{atom.resid}:{atom.name}")
+		kept = _with_radius(sasa, molecules[0]) # the same for all molecules of the type
+		stacked = sasa.sasa[members[kept]] # (n_kept, n_molecules, n_frames)
+		for atom, series in zip(sasa.ag[members[kept, 0]], stacked):
+			labels.append(f"{prefix}{atom_label(atom)}")
 			pooled.append(series.ravel())
 	return labels, pooled
 
@@ -476,15 +478,16 @@ def atom_sasa_at(sasa, molecule: int, frame: int) -> dict[int, float]:
 	dict of int to float
 		panel index -> SASA (nm^2); empty if the frame was not analysed
 	"""
+	sasa._check_run(atoms=True)
 	analysed = np.flatnonzero(sasa.frames == frame)
 	if not len(analysed):
 		return {}
 	molecule %= sasa.n_molecules
 	offset = 0
 	for molecules in sasa.types.values():
-		kept = _with_radius(sasa, sasa.molecule_atoms(molecules[0]))
+		kept = _with_radius(sasa, molecules[0])
 		if molecule in molecules:
-			values = sasa.get_sasa(sasa.molecule_atoms(molecule), per_atom=True)[kept, analysed[0]]
+			values = sasa.sasa[sasa._members[molecule][kept], analysed[0]]
 			return {offset + k: float(value) for k, value in enumerate(values)}
 		offset += int(kept.sum())
 	raise AssertionError('unreachable: every molecule has a type')

@@ -37,7 +37,7 @@ def molecule_index(ag: mda.AtomGroup) -> np.ndarray:
 	4. else ``ag`` is taken as consecutive copies of one molecule: the shortest repeating
 	   unit of atoms with the same atom names, residue names and resids (up to an offset
 	   per copy) in the same order, see :func:`copy_length`. If nothing repeats, ``ag`` is
-	   a single molecule, with a warning.
+	   a single molecule, with a warning if it spans several residues.
 
 	Bonds are not guessed: guessing is slow for large systems and unreliable for
 	coarse-grained models (guess them in MDAnalysis first if wanted, e.g.
@@ -84,6 +84,9 @@ def copy_length(ag: mda.AtomGroup) -> int:
 		if (relative == relative[0]).all():
 			logger.debug("molecules from repeating units: %d copies of %d atoms", copies, length)
 			return length
+	if len(np.unique(ag.resindices)) == 1: # a single residue: most likely a single molecule, no reason to warn
+		logger.debug("molecules: no repeating unit in %d atoms of one residue, taken as one molecule", n)
+		return n
 	logger.warning("no molecules found: the topology has neither molecules (molnums, e.g. tpr) nor bonds, and "
 	               "%d atoms are no consecutive copies of one molecule; treating the selection as one molecule "
 	               "(use a tpr or a topology with bonds, select one molecule type, or use whole mode)", n)
@@ -94,8 +97,19 @@ def split_molecules(ag: mda.AtomGroup) -> list[mda.AtomGroup]:
 	Split ``ag`` into its molecules (see :func:`molecule_index`), in the order in
 	which they appear.
 	'''
-	molecules = molecule_index(ag)
-	return [ag[molecules == i] for i in range(molecules.max() + 1 if len(molecules) else 0)]
+	return [ag[members] for members in molecule_members(molecule_index(ag))]
+
+def molecule_members(molecules: np.ndarray, n_molecules: int | None = None) -> list[np.ndarray]:
+	'''
+	Atoms of every molecule: for every molecule index 0, 1, ... the (sorted) positions in
+	``molecules`` (the molecule index of every atom, see :func:`molecule_index`) of its atoms.
+	One pass over all atoms, instead of one comparison of all atoms per molecule.
+	'''
+	molecules = np.asarray(molecules, dtype=np.int64)
+	if n_molecules is None:
+		n_molecules = int(molecules.max()) + 1 if len(molecules) else 0
+	order = np.argsort(molecules, kind='stable')
+	return np.split(order, np.cumsum(np.bincount(molecules, minlength=n_molecules))[:-1]) if n_molecules else []
 
 def molecule_types(ag: mda.AtomGroup, molecules: np.ndarray | None = None) -> list[str]:
 	'''
@@ -120,17 +134,24 @@ def molecule_types(ag: mda.AtomGroup, molecules: np.ndarray | None = None) -> li
 	if hasattr(ag.atoms, 'moltypes'):
 		first = np.unique(molecules, return_index=True)[1]
 		return [str(name) for name in ag.moltypes[first]]
-	attrs = [attr for attr in ('names', 'resnames') if hasattr(ag.atoms, attr)]
+	values = [getattr(ag, attr) for attr in ('names', 'resnames') if hasattr(ag.atoms, attr)]
+	resnames = ag.resnames if hasattr(ag.atoms, 'resnames') else None
 	names, signatures, bases = [], {}, {} # signature (names, resnames) -> type name; base -> count
-	for i in range(n):
-		atoms = ag[molecules == i]
-		signature = tuple(tuple(getattr(atoms, attr)) for attr in attrs)
+	for members in molecule_members(molecules, n):
+		signature = tuple(tuple(value[members].tolist()) for value in values)
 		if signature not in signatures:
-			base = str(atoms.resnames[0]) if hasattr(atoms, 'resnames') else 'molecule'
+			base = str(resnames[members[0]]) if resnames is not None else 'molecule'
 			bases[base] = bases.get(base, 0) + 1
 			signatures[signature] = base if bases[base] == 1 else f"{base}_{bases[base]}"
 		names.append(signatures[signature])
 	return names
+
+
+def atom_label(atom: mda.core.groups.Atom) -> str:
+	'''Short name of an atom: ``<resname><resid>:<name>``, e.g. ``GSH1:SG``.'''
+	resname = getattr(atom, 'resname', '')
+	resid = getattr(atom, 'resid', atom.resindex + 1)
+	return f"{resname}{resid}:{getattr(atom, 'name', atom.index)}"
 
 
 def molecule_labels(types: list[str]) -> list[str]:

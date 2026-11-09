@@ -15,7 +15,8 @@ from MDAnalysis.analysis.align import rotation_matrix
 from scipy.stats import gaussian_kde
 
 from .dots import unit_dots
-from .engine import surface_dots
+from .engine import _surface_dots, warn_coincident
+from .groups import atom_label
 from .radii import PROBE_RADIUS, atom_radii, radii_remarks
 from .units import to_angstrom, to_nm
 
@@ -77,7 +78,7 @@ class Surface:
 def generate_surface(atoms: mda.AtomGroup, radii: ArrayLike | None = None, probe: float = PROBE_RADIUS,
                      block: ArrayLike | None = None, frame: int | None = None,
                      reference: ArrayLike | mda.AtomGroup | None = None, frames: ArrayLike | None = None,
-                     ndots: int = SURFACE_DOTS, cg: bool = False) -> Surface:
+                     ndots: int = SURFACE_DOTS, cg: bool = False, custom_radii: bool | None = None) -> Surface:
 	"""
 	Solvent accessible surface dots (Connolly-style dot surface) of ``atoms`` in one
 	frame of their trajectory.
@@ -106,6 +107,9 @@ def generate_surface(atoms: mda.AtomGroup, radii: ArrayLike | None = None, probe
 		minimum number of dots per atom
 	cg : bool
 		Martini CG radii (default radii, and the REMARK records)
+	custom_radii : bool, optional
+		whether ``radii`` are custom (not the defaults), for the REMARK records; default
+		True if ``radii`` are given
 
 	Returns
 	-------
@@ -114,7 +118,7 @@ def generate_surface(atoms: mda.AtomGroup, radii: ArrayLike | None = None, probe
 	"""
 	if frame is not None and reference is not None:
 		raise ValueError("Give either a frame or a reference structure, not both.")
-	custom = radii is not None
+	custom = radii is not None if custom_radii is None else custom_radii
 	radii = atom_radii(atoms, cg=cg) if radii is None else np.asarray(radii, dtype=float)
 	trajectory = atoms.universe.trajectory
 	current = trajectory.ts.frame
@@ -141,7 +145,8 @@ def generate_surface(atoms: mda.AtomGroup, radii: ArrayLike | None = None, probe
 		trajectory[current] # leave the trajectory on the frame it was on
 
 	# generate dots
-	dots, owners, area = surface_dots(positions, radii, probe=probe, ndots=ndots, block=block)
+	dots, owners, area, coincident = _surface_dots(positions, radii, probe=probe, ndots=ndots, block=block)
+	warn_coincident(coincident, label=lambda i: f"{atom_label(atoms[i])} (frame {frame})")
 
 	# write remarks for the PDB file
 	n_dots = len(unit_dots(int(ndots)))

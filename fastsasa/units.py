@@ -8,6 +8,7 @@ import numpy as np
 from numpy.typing import ArrayLike
 
 NM_PER_ANGSTROM = 0.1
+ANGSTROM_PER_NM = 10.0 # multiplied, not divided by 0.1: 0.3 nm -> 3.0, not 2.9999999999999996 Å
 
 
 def to_nm(angstrom: ArrayLike) -> np.ndarray:
@@ -17,4 +18,4 @@ def to_nm(angstrom: ArrayLike) -> np.ndarray:
 
 def to_angstrom(nm: ArrayLike) -> np.ndarray:
 	"""Coordinates in nm -> float64 array in Å (e.g. for MDAnalysis)."""
-	return np.asarray(nm, dtype=np.float64) / NM_PER_ANGSTROM
+	return np.asarray(nm, dtype=np.float64) * ANGSTROM_PER_NM

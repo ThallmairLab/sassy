@@ -12,6 +12,8 @@ import logging
 import numpy as np
 import MDAnalysis as mda
 
+from .groups import atom_label
+
 logger = logging.getLogger(__name__)
 
 AA_RADII = {
@@ -53,19 +55,29 @@ def _element_guesser():
 def atom_symbols(ag: mda.AtomGroup, cg: bool = False) -> list[str]:
 	'''
 	Symbols used to look up the radius of each atom
-	- AA: respective element. If the topology has no elements (e.g. gro, pdb without element column), 
+	- AA: respective element; for an empty element (e.g. a virtual site) the first letter of the
+		  atom name. If the topology has no elements (e.g. gro, pdb without element column),
 		  they are guessed from the atom names with the MDAnalysis guesser ('CLA' -> 'Cl', 'SOD' -> 'Na'),
 	 	  without changing ``ag``.
 	- CG: bead size (R = regular, S = small, T = tiny, U = dummy) derived from atom type.
 	'''
 	if cg:
-		return [at[0] if at[0] in ("S", "T", "U") else "R" for at in ag.types]
+		size = {at: at[:1] if at[:1] in ("S", "T", "U") else "R" for at in set(ag.types)}
+		return [size[at] for at in ag.types]
+	# every distinct element / name is looked up once (fast for large systems)
+	names = ag.names
 	if hasattr(ag.atoms, "elements"):
-		return [_symbol(el if el else a.name[0]) for el, a in zip(ag.elements, ag)]
+		# an empty element (e.g. a virtual site in a tpr) uses the first letter of the name, not the
+		# guess: the guesser turns virtual sites into real elements (MN1 -> N, LP1 -> P), the first
+		# letter gives an unknown symbol, i.e. an error asking for its radius
+		elements = ag.elements
+		by_element = {element: _symbol(element) for element in set(elements) if element}
+		by_name = {name: _symbol(name[:1]) for element, name in zip(elements, names) if not element}
+		return [by_element[element] if element else by_name[name] for element, name in zip(elements, names)]
 	logger.debug("no elements in the topology: guessing them from the atom names")
 	guess = _element_guesser()
-	guessed = {name: guess(name) for name in set(ag.names)}
-	return [_symbol(guessed[name] or name[:1]) for name in ag.names]
+	symbol = {name: _symbol(guess(name) or name[:1]) for name in set(names)}
+	return [symbol[name] for name in names]
 
 def radii_remarks(ag: mda.AtomGroup, cg: bool = False, custom: bool = False,
                   probe: float = PROBE_RADIUS) -> list[str]:
@@ -119,7 +131,7 @@ def atom_radii(ag: mda.AtomGroup, cg: bool = False, table: Mapping[str, float] |
 	unknown = [i for i, sym in enumerate(symbols) if sym not in table]
 	if unknown:
 		kind = 'bead size' if cg else 'element'
-		atoms = ', '.join(f"{ag[i].resname}{ag[i].resid}:{ag[i].name} ({kind} {symbols[i]!r})"
+		atoms = ', '.join(f"{atom_label(ag[i])} ({kind} {symbols[i]!r})"
 		                  for i in unknown[:10])
 		more = f" and {len(unknown) - 10} more" if len(unknown) > 10 else ""
 		missing = list(dict.fromkeys(symbols[i] for i in unknown))

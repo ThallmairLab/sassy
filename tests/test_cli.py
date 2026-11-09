@@ -97,6 +97,7 @@ def test_cli_whole_selection(tmp_path):
     assert read_xvg(out)[0][1] == pytest.approx(single[3], abs=1e-3)
 
 
+@pytest.mark.filterwarnings('ignore::UserWarning') # MDAnalysis writing and reading the PDB
 def test_cli_molecule_types_warning(tmp_path, capsys):
     """Per molecule (default) warns about a selection of several molecule types, -whole does not."""
     from fastsasa import n_molecule_types
@@ -113,17 +114,16 @@ def test_cli_molecule_types_warning(tmp_path, capsys):
     two.residues[1].resname = 'OTH'
     assert n_molecule_types(two.atoms) == 2
 
-    import fastsasa.bin.fastsasa as cli
+    # two molecule types in a PDB file with bonds (the molecules from the bonds), once each
+    two.atoms[gsh.n_atoms:].positions += 50 # apart: no overlap in -whole
+    pdb = str(tmp_path / 'two.pdb')
+    two.atoms.write(pdb, bonds='all')
     out = str(tmp_path / 'x.xvg')
-    original = cli.n_molecule_types
-    cli.n_molecule_types = lambda ag: 2
-    try:
-        assert main(['-s', TPR, '-f', XTC, '-e', '1', '-ndots', '240', '-whole', '-q', '-o', out]) == 0
-        assert 'WARNING' not in capsys.readouterr().err
-        assert main(['-s', TPR, '-f', XTC, '-e', '1', '-ndots', '240', '-q', '-o', out]) == 0
-        assert '2 different molecule types' in capsys.readouterr().err
-    finally:
-        cli.n_molecule_types = original
+    assert main(['-s', pdb, '-ndots', '240', '-whole', '-q', '-o', out]) == 0
+    assert 'WARNING' not in capsys.readouterr().err
+    assert main(['-s', pdb, '-ndots', '240', '-q', '-o', out]) == 0
+    err = capsys.readouterr().err
+    assert err.count('2 different molecule types') == 1
 
 
 def test_cli_logging(tmp_path, capsys):
@@ -145,3 +145,49 @@ def test_cli_logging(tmp_path, capsys):
     # errors of the SASA setup are logged, not raised
     assert main(run + ['-q', '-radius', 'C=-1']) == 1
     assert 'fastsasa: ERROR: Radii must be >= 0' in capsys.readouterr().err
+
+
+def test_cli_frames(tmp_path):
+    """-b/-e/-skip are frame indices as in Python slicing: -e is excluded."""
+    out = tmp_path / 'x.npz'
+    assert main(['-s', TPR, '-f', XTC, '-b', '2', '-e', '10', '-skip', '3', '-ndots', '240', '-q', '-o', str(out)]) == 0
+    assert np.load(out)['frames'].tolist() == [2, 5, 8]
+
+
+def test_cli_input_errors(tmp_path, capsys):
+    """Unreadable files and invalid selections are logged errors (exit 1), invalid numbers usage errors."""
+    out = str(tmp_path / 'x.xvg')
+    run = ['-s', TPR, '-f', XTC, '-e', '1', '-ndots', '240', '-o', out]
+    assert main(['-s', str(tmp_path / 'missing.tpr'), '-o', out]) == 1
+    assert 'fastsasa: ERROR: cannot read' in capsys.readouterr().err
+    assert main(run + ['-select', 'nonsense ((']) == 1
+    assert 'fastsasa: ERROR: invalid selection' in capsys.readouterr().err
+    assert main(run + ['-group', 'name ((']) == 1
+    assert 'fastsasa: ERROR: invalid selection' in capsys.readouterr().err
+    assert main(run + ['-surface', str(tmp_path), '-surface-ref', str(tmp_path / 'missing.pdb')]) == 1
+    assert 'cannot read the reference structure' in capsys.readouterr().err
+    for bad in (['-ndots', '0'], ['-probe', '-0.1'], ['-skip', '0'], ['-surface-ndots', '-5'],
+                ['-max-frame-atoms', '0'], ['-nt', '100000']):
+        with pytest.raises(SystemExit):
+            main(run + bad)
+    capsys.readouterr()
+
+
+def test_cli_output_formats(tmp_path, capsys):
+    """Missing output directories are created; .NPZ is npz; other extensions are xvg, with a warning."""
+    run = ['-s', TPR, '-f', XTC, '-e', '2', '-ndots', '240', '-q']
+    out = tmp_path / 'new' / 'x.NPZ'
+    assert main(run + ['-o', str(out)]) == 0
+    assert np.load(out)['sasa'].shape == (1, 2)
+    out = tmp_path / 'x.dat'
+    assert main(run + ['-o', str(out)]) == 0
+    assert 'unknown extension' in capsys.readouterr().err
+    assert read_xvg(out)[0].shape == (2, 2)
+
+
+def test_xvg_quoted_labels(tmp_path):
+    """A double quote in a label does not end the legend string."""
+    from fastsasa.bin.fastsasa import _write_xvg
+    out = tmp_path / 'x.xvg'
+    _write_xvg(out, np.arange(2.0), np.ones((1, 2)), ['name "SG"'], 'fastsasa')
+    assert read_xvg(out)[1] == ["name 'SG'"]

@@ -310,3 +310,65 @@ def test_save_atoms(gsh_aa, tmp_path):
         light.get_sasa(per_atom=True)
     with pytest.raises(ValueError, match='save_atoms'):
         light.run(per_atom=True)
+
+
+def test_invalid_parameters(gsh_aa):
+    """ndots < 1 and a negative probe are errors."""
+    with pytest.raises(ValueError, match='dots per atom must be >= 1'):
+        SASA(gsh_aa, ndots=0)
+    with pytest.raises(ValueError, match='probe radius must be >= 0'):
+        SASA(gsh_aa, probe=-0.1)
+    with pytest.raises(ValueError, match='probe radius must be >= 0'):
+        surface_dots(np.zeros((1, 3)), [0.2], probe=-0.1)
+
+
+def test_representative_frame_range(gsh_aa):
+    """A fixed frame out of range is an IndexError, not wrapped around; negative counts from the end."""
+    sasa = SASA(gsh_aa, ndots=240)
+    sasa.run()
+    n_frames = gsh_aa.universe.trajectory.n_frames
+    with pytest.raises(IndexError, match='out of range'):
+        sasa.representative('GSH', frame=n_frames)
+    assert sasa.representative('GSH', frame=-1)[1] == n_frames - 1
+
+
+def test_sasa_coincident_warning(gsh_aa, caplog):
+    """Atoms at an identical position are warned about once per run, with the frames affected."""
+    import logging
+    coordinates = gsh_aa.universe.trajectory.coordinate_array
+    coordinates[:3, 1] = coordinates[:3, 0] # atom 1 on atom 0 in the first 3 frames
+    sasa = SASA(gsh_aa, ndots=240, max_frame_atoms=gsh_aa.n_atoms * 2) # several blocks
+    with caplog.at_level(logging.WARNING, logger='fastsasa'):
+        sasa.run()
+    records = [r for r in caplog.records if 'identical position' in r.getMessage()]
+    assert len(records) == 1
+    a, b = gsh_aa[0], gsh_aa[1]
+    assert 'in 3 frame(s)' in records[0].getMessage()
+    assert f"{a.resname}{a.resid}:{a.name}/{b.resname}{b.resid}:{b.name}" in records[0].getMessage()
+
+
+def test_molecule_members():
+    """molecule_members groups the atoms of every molecule as a boolean mask per molecule would."""
+    from fastsasa.groups import molecule_members
+    molecules = np.array([0, 0, 2, 1, 2, 0, 1])
+    members = molecule_members(molecules)
+    assert [m.tolist() for m in members] == [np.flatnonzero(molecules == i).tolist() for i in range(3)]
+    assert molecule_members(np.zeros(0, dtype=int)) == []
+
+
+def test_single_residue_no_warning(caplog):
+    """A single non-repeating residue without molnums or bonds is one molecule, without a warning."""
+    import logging
+    import MDAnalysis as mda
+    from fastsasa import molecule_index
+    universe = mda.Universe.empty(3, n_residues=1, atom_resindex=[0, 0, 0], trajectory=True)
+    universe.add_TopologyAttr('names', ['C1', 'O1', 'N1'])
+    with caplog.at_level(logging.WARNING, logger='fastsasa'):
+        assert molecule_index(universe.atoms).tolist() == [0, 0, 0]
+    assert 'no molecules found' not in caplog.text
+
+
+def test_units_round_trip():
+    """nm -> Å multiplies by 10 exactly."""
+    from fastsasa import to_angstrom
+    assert to_angstrom(0.3) == 3.0

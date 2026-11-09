@@ -2,7 +2,10 @@
 import numpy as np
 import pytest
 
+import logging
+
 from fastsasa import unit_dots, surface_dots
+from fastsasa.engine import _exposed_counts, _exposed_dots
 
 
 def test_single_sphere():
@@ -72,3 +75,33 @@ def test_surface_dots_brute_force():
     assert area == pytest.approx(expected.sum(), rel=1e-12)
     counts = np.bincount(owners, minlength=60)
     assert np.allclose(counts / len(unit) * 4 * np.pi * (radii + 0.191)**2, expected)
+
+
+def test_counts_equal_mask():
+    """The count-only kernel gives the number of exposed dots of the mask."""
+    rng = np.random.default_rng(5)
+    xyz = rng.uniform(0, 2.0, size=(300, 3))
+    ext = rng.choice([0.3, 0.35, 0.45], size=300)
+    block = rng.integers(0, 3, size=300)
+    unit = unit_dots(500)
+    mask, pairs_mask = _exposed_dots(xyz, ext, block, unit)
+    counts, pairs_counts = _exposed_counts(xyz, ext, block, unit)
+    assert np.array_equal(counts, mask.sum(axis=1))
+    assert len(pairs_mask) == len(pairs_counts) == 0
+
+
+def test_coincident_warning(caplog):
+    """
+    Atoms with a radius at an identical position are warned about (with equal radii
+    neither buries the other); not if one has radius 0 or they are in different blocks.
+    """
+    xyz = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.3, 0.0, 0.0]])
+    with caplog.at_level(logging.WARNING, logger='fastsasa'):
+        surface_dots(xyz, [0.2, 0.2, 0.2], ndots=240)
+    assert '1 pair(s) of atoms with a non-zero radius share an identical position' in caplog.text
+    assert 'atom 0/atom 1' in caplog.text
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger='fastsasa'):
+        surface_dots(xyz, [0.2, 0.0, 0.2], ndots=240)
+        surface_dots(xyz, [0.2, 0.2, 0.2], ndots=240, block=[0, 1, 0])
+    assert 'identical position' not in caplog.text

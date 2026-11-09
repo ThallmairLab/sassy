@@ -11,8 +11,8 @@ import MDAnalysis as mda
 from MDAnalysis.lib.log import ProgressBar
 
 from .dots import unit_dots
-from .engine import _exposed_dots
-from .groups import molecule_index, molecule_labels, molecule_types
+from .engine import _exposed_counts, warn_coincident
+from .groups import atom_label, molecule_index, molecule_labels, molecule_members, molecule_types
 from .radii import PROBE_RADIUS, atom_radii
 from .units import to_nm
 from .surface import SURFACE_DOTS, Surface, _statistic, generate_surface
@@ -96,6 +96,8 @@ class SASA:
 	             radii: ArrayLike | Mapping[str, float] | None = None, max_frame_atoms: int = 20000,
 	             per_molecule: bool = True, save_atoms: bool = True) -> None:
 
+		if not probe >= 0:
+			raise ValueError(f"The probe radius must be >= 0 (nm), got {probe}.")
 		# prepare radii
 		self._custom_radii = radii is not None # for the remarks of written surfaces
 		if radii is None or isinstance(radii, Mapping):
@@ -117,6 +119,7 @@ class SASA:
 		molecules = molecule_index(ag) if per_molecule else np.zeros(ag.n_atoms, dtype=int)
 		self.n_molecules = int(molecules.max()) + 1 if len(molecules) else 0
 		self._molecule_of_atom = molecules
+		self._members = molecule_members(molecules, self.n_molecules) # indices in ag of the atoms of every molecule
 		# type and label of every molecule, and the molecules of every type (in order of appearance)
 		self.molecule_types = molecule_types(ag, molecules) if per_molecule else ['selection'] * self.n_molecules
 		self.molecule_labels = molecule_labels(self.molecule_types) if per_molecule else self.molecule_types[:]
@@ -158,7 +161,7 @@ class SASA:
 		             self._frames_per_block)
 
 	# SASA calculation
-	def _atom_areas(self, xyz: np.ndarray) -> np.ndarray:
+	def _atom_areas(self, xyz: np.ndarray, coincident: list | None = None) -> np.ndarray:
 		"""
 		SASA (nm^2) of every atom in a block of frames.
 
@@ -166,6 +169,9 @@ class SASA:
 		----------
 		xyz : np.ndarray
 			(n_frames, n_atoms, 3) positions (nm) of the atoms with a radius
+		coincident : list, optional
+			gets (number of frames, (n_pairs, 2) indices in ``ag``) of the atoms at an
+			identical position in this block of frames, if any
 
 		Returns
 		-------
@@ -183,15 +189,17 @@ class SASA:
 		xyz[:, 0] += block * span
 		
 		ext = np.tile(self._ext, n_frames)
-		exposed = np.count_nonzero(_exposed_dots(xyz, ext, block, self.unit), axis=1)
-		areas = exposed.reshape(n_frames, n_atoms) * self._dot_area
-		return areas
+		exposed, pairs = _exposed_counts(xyz, ext, block, self.unit)
+		if coincident is not None and len(pairs):
+			coincident.append((len(np.unique(pairs[:, 0] // n_atoms)), self._active[pairs % n_atoms]))
+		return exposed.reshape(n_frames, n_atoms) * self._dot_area
 
 	def _atom_blocks(self, start: int | None, stop: int | None, step: int | None,
-	                 times: list | None = None) -> Iterator[np.ndarray]:
+	                 times: list | None = None, coincident: list | None = None) -> Iterator[np.ndarray]:
 		"""
 		Calculate the atom SASA, (n_frames, n_atoms), of blocks of frames of ``start:stop:step``;
-		the time of every frame is appended to ``times``.
+		the time of every frame is appended to ``times``, atoms at an identical position to
+		``coincident`` (see :meth:`_atom_areas`).
 		"""
 		trajectory = self.ag.universe.trajectory
 		current = trajectory.ts.frame
@@ -202,10 +210,10 @@ class SASA:
 				if times is not None:
 					times.append(ts.time)
 				if len(buffer) == self._frames_per_block: 
-					yield self._atom_areas(np.array(buffer)) # run SASA calculation
+					yield self._atom_areas(np.array(buffer), coincident) # run SASA calculation
 					buffer = []
 			if buffer:
-				yield self._atom_areas(np.array(buffer))
+				yield self._atom_areas(np.array(buffer), coincident)
 		finally:
 			trajectory[current] # leave the trajectory on the frame it was on
 
@@ -258,12 +266,12 @@ class SASA:
 		n_frames = len(frames)
 		atom_sasa = np.zeros((self.ag.n_atoms, n_frames)) if self.save_atoms else None
 		molecule_sasa = np.zeros((self.n_molecules, n_frames))
-		times = []
+		times, coincident = [], []
 		tic = time.perf_counter()
 		if len(self._indices) and n_frames: # else only atoms without radius / no frames
 			done = 0
 			with ProgressBar(total=n_frames, disable=not verbose, desc=f"SASA calculation {name}", unit="frame") as bar:
-				for areas in self._atom_blocks(start, stop, step, times):
+				for areas in self._atom_blocks(start, stop, step, times, coincident):
 					block = slice(done, done + len(areas))
 					if atom_sasa is not None:
 						atom_sasa[self._active, block] = areas.T
@@ -274,6 +282,9 @@ class SASA:
 			current = trajectory.ts.frame
 			times = [ts.time for ts in trajectory[start:stop:step]]
 			trajectory[current]
+		if coincident: # once per run, not per block of frames
+			warn_coincident(np.concatenate([pairs for _, pairs in coincident]),
+			                label=lambda i: atom_label(self.ag[i]), frames=sum(n for n, _ in coincident))
 		# results only replaced after a complete run
 		self.frames, self.times = frames, np.array(times, dtype=float)
 		self.sasa, self.molecule_sasa = atom_sasa, molecule_sasa
@@ -421,7 +432,7 @@ class SASA:
 		"""
 		if molecule is None:
 			return self.ag
-		return self.ag[self._molecule_of_atom == self.molecule_number(molecule)]
+		return self.ag[self._members[self.molecule_number(molecule)]]
 
 	def _molecule_remark(self, atoms: mda.AtomGroup, molecule: int) -> str:
 		"""REMARK record naming the atoms of a written surface: which molecule, or the whole AtomGroup."""
@@ -448,8 +459,8 @@ class SASA:
 		statistic : str, callable or float
 			see :meth:`write_surface`
 		frame : int, optional
-			fixed trajectory frame: only the molecule is chosen (the first of the type if the
-			frame was not analysed)
+			fixed trajectory frame (negative counts from the end): only the molecule is chosen
+			(the first of the type if the frame was not analysed); IndexError if out of range
 
 		Returns
 		-------
@@ -470,7 +481,10 @@ class SASA:
 		if frame is None:
 			k, column = np.unravel_index(np.argmin(np.abs(values - target)), values.shape)
 			return int(molecules[k]), int(self.frames[column]), target
-		frame = int(frame) % self.ag.universe.trajectory.n_frames
+		n_frames = self.ag.universe.trajectory.n_frames
+		if not -n_frames <= frame < n_frames:
+			raise IndexError(f"Frame {frame} out of range for {n_frames} frame(s).")
+		frame = int(frame) % n_frames
 		analysed = np.flatnonzero(self.frames == frame)
 		if not len(analysed):
 			return int(molecules[0]), frame, target
@@ -555,7 +569,7 @@ class SASA:
 				chosen = self._chosen_remark(molecule, frame, target, name)
 		atoms = self.molecule_atoms(molecule) # whole mode: all of ag
 		indices = self._lookup[atoms.indices]
-		result = generate_surface(atoms, radii=self.radii[indices] if self._custom_radii else None,
+		result = generate_surface(atoms, radii=self.radii[indices], custom_radii=self._custom_radii,
 		                          probe=self.probe, block=self._molecule_of_atom[indices], frame=frame,
 		                          reference=reference, frames=self.frames, ndots=ndots, cg=self.cg)
 		result.remarks.insert(2, self._molecule_remark(atoms, molecule)) # after the frame

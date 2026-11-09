@@ -12,9 +12,10 @@ from collections.abc import Sequence
 from pathlib import Path
 import numpy as np
 import MDAnalysis as mda
+from MDAnalysis.exceptions import SelectionError
 
 from .. import __version__
-from ..groups import n_molecule_types
+from ..groups import atom_label
 from ..radii import PROBE_RADIUS
 from ..sasa import N_DOTS, SASA
 from ..surface import STATISTICS, SURFACE_DOTS
@@ -62,6 +63,28 @@ def _radius(text: str) -> tuple[str, float]:
 		raise argparse.ArgumentTypeError(f"expected SYMBOL=RADIUS (nm), e.g. Na=0.227, got {text!r}") from None
 
 
+def _positive_int(text: str) -> int:
+	"""An integer >= 1."""
+	try:
+		value = int(text)
+	except ValueError:
+		raise argparse.ArgumentTypeError(f"expected an integer, got {text!r}") from None
+	if value < 1:
+		raise argparse.ArgumentTypeError(f"expected an integer >= 1, got {value}")
+	return value
+
+
+def _non_negative(text: str) -> float:
+	"""A number >= 0."""
+	try:
+		value = float(text)
+	except ValueError:
+		raise argparse.ArgumentTypeError(f"expected a number, got {text!r}") from None
+	if not value >= 0:
+		raise argparse.ArgumentTypeError(f"expected a number >= 0, got {text}")
+	return value
+
+
 def _statistic(text: str) -> str | float:
 	"""Name of a statistic of the SASA series, or a SASA value (nm^2)."""
 	if text in STATISTICS:
@@ -100,15 +123,17 @@ def parser() -> argparse.ArgumentParser:
 	                 help='one column with the summed SASA of these atoms (MDAnalysis selection within select); repeatable')
 	sel.add_argument('-total', action='store_true', help='add a column with the total SASA of the selection')
 
-	frames = p.add_argument_group('frames')
-	frames.add_argument('-b', type=int, default=None, help='First frame', dest='start')
-	frames.add_argument('-e', type=int, default=None, help='Last frame', dest='stop')
-	frames.add_argument('-skip', type=int, default=None, help='use every skip-th frame', dest='step')
+	frames = p.add_argument_group('frames', 'frame indices (0 = first; not times in ps as in GROMACS), '
+	                              'as in Python slicing trajectory[b:e:skip]')
+	frames.add_argument('-b', type=int, default=None, help='first frame (included; negative counts from the end)', dest='start')
+	frames.add_argument('-e', type=int, default=None, help='stop frame (excluded: -b 0 -e 10 gives frames 0-9; '
+	                    'negative counts from the end); default up to the last frame', dest='stop')
+	frames.add_argument('-skip', type=_positive_int, default=None, help='use every skip-th frame', dest='step')
 
 	model = p.add_argument_group('model')
 	model.add_argument('-cg', action='store_true', help='Martini CG bead radii instead of atomistic radii')
-	model.add_argument('-probe', type=float, default=PROBE_RADIUS, help='probe radius (nm)')
-	model.add_argument('-ndots', type=int, default=N_DOTS, help='minimum number of dots per atom')
+	model.add_argument('-probe', type=_non_negative, default=PROBE_RADIUS, help='probe radius (nm)')
+	model.add_argument('-ndots', type=_positive_int, default=N_DOTS, help='minimum number of dots per atom')
 	model.add_argument('-radius', type=_radius, action='append', default=[], metavar='SYMBOL=RADIUS',
 	                   help='radius (nm) by element (bead size with cg), adds to or replaces the defaults; repeatable')
 
@@ -133,11 +158,11 @@ def parser() -> argparse.ArgumentParser:
 	                           help=f"of every type use the molecule and analysed frame whose SASA is closest to this "
 	                                f"statistic of the SASA distribution of the type (all its molecules and frames; "
 	                                f"{', '.join(STATISTICS)}; default median) or to this SASA (nm^2)")
-	surf.add_argument('-surface-ndots', type=int, default=SURFACE_DOTS, help='minimum number of dots per atom of the surface')
+	surf.add_argument('-surface-ndots', type=_positive_int, default=SURFACE_DOTS, help='minimum number of dots per atom of the surface')
 
 	perf = p.add_argument_group('performance')
-	perf.add_argument('-max-frame-atoms', type=int, default=20000, help='atoms (summed over frames) per parallel call')
-	perf.add_argument('-nt', type=int, default=None, help='number of threads (default: all cores)', dest='threads')
+	perf.add_argument('-max-frame-atoms', type=_positive_int, default=20000, help='atoms (summed over frames) per parallel call')
+	perf.add_argument('-nt', type=_positive_int, default=None, help='number of threads (default: all cores)', dest='threads')
 	log = p.add_argument_group('logging').add_mutually_exclusive_group()
 	log.add_argument('-v', action='store_true', help='verbose: debug messages (molecules, radii, timing)', dest='verbose')
 	log.add_argument('-q', action='store_true', help='quiet: only warnings and errors, no progress bar', dest='quiet')
@@ -153,7 +178,7 @@ def _columns(sasa: SASA, args: argparse.Namespace) -> tuple[np.ndarray, list[str
 			labels.append(group)
 	elif args.per_atom:
 		columns.extend(sasa.sasa)
-		labels.extend(f"{a.resname}{a.resid}:{a.name}" for a in sasa.ag)
+		labels.extend(atom_label(a) for a in sasa.ag)
 	elif args.whole: # one column: the total already
 		columns.append(sasa.get_sasa())
 		labels.append(args.select)
@@ -213,7 +238,11 @@ def _surface_options(args: argparse.Namespace, sasa: SASA) -> list[dict] | bool:
 			logger.error("-surface-ref needs a single surface: the selection holds %d molecule types (%s); "
 			             "give -surface-molecule", len(jobs), ', '.join(sasa.types))
 			return False
-		reference = mda.Universe(args.surface_ref).atoms
+		try:
+			reference = mda.Universe(args.surface_ref).atoms
+		except Exception as error: # missing file, unknown format, ...
+			logger.error("cannot read the reference structure %s: %s", args.surface_ref, error)
+			return False
 		job = jobs[0]
 		molecule = job['molecule'] if 'molecule' in job else int(sasa.types[job['molecule_type']][0])
 		n_atoms = sasa.molecule_atoms(molecule).n_atoms
@@ -259,40 +288,51 @@ def _write_xvg(path: Path, times: np.ndarray, columns: np.ndarray, labels: list[
 		out.write('@    yaxis  label "Area (nm\\S2\\N)"\n')
 		out.write('@TYPE xy\n')
 		for i, label in enumerate(labels):
+			label = label.replace('"', "'") # a double quote would end the legend string
 			out.write(f'@ s{i} legend "{label}"\n')
 		np.savetxt(out, np.column_stack([times, columns.T]), fmt='%12.4f')
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-	args = parser().parse_args(argv)
+	p = parser()
+	args = p.parse_args(argv)
 	if args.per_atom and args.group:
-		parser().error('per-atom and group cannot be combined')
-	_setup_logging(args.verbose, args.quiet)
-	logger.debug("fastsasa %s: %s", __version__, ' '.join(sys.argv[1:] if argv is None else argv))
+		p.error('per-atom and group cannot be combined')
 	if args.threads is not None:
 		import numba
+		if args.threads > numba.config.NUMBA_NUM_THREADS:
+			p.error(f"-nt {args.threads}: at most {numba.config.NUMBA_NUM_THREADS} threads available")
 		numba.set_num_threads(args.threads)
+	_setup_logging(args.verbose, args.quiet)
+	logger.debug("fastsasa %s: %s", __version__, ' '.join(sys.argv[1:] if argv is None else argv))
+	output = Path(args.output)
+	if output.suffix.lower() not in ('.xvg', '.npz'):
+		logger.warning("output %s: unknown extension, written as xvg (text); use .xvg or .npz", output)
 
 	logger.debug("reading %s %s", args.topology, ' '.join(args.trajectory))
-	universe = mda.Universe(args.topology, *args.trajectory)
+	try:
+		universe = mda.Universe(args.topology, *args.trajectory)
+	except Exception as error: # missing file, unknown format, mismatching atoms, ...
+		logger.error("cannot read %s: %s", ' '.join([args.topology, *args.trajectory]), error)
+		return 1
 	if not hasattr(universe, 'trajectory'):
 		logger.error("%s has no coordinates; give a trajectory with -f", args.topology)
 		return 1
 	logger.debug("universe: %d atoms, %d frame(s)", universe.atoms.n_atoms, universe.trajectory.n_frames)
-	ag = universe.select_atoms(args.select)
-	if not ag.n_atoms:
-		logger.error("the selection %r contains no atoms", args.select)
-		return 1
-	for group in args.group: # check the groups before the (long) calculation
-		n_group = ag.select_atoms(group).n_atoms
-		if not n_group:
-			logger.error("the group %r contains no atoms of the selection", group)
+	try:
+		ag = universe.select_atoms(args.select)
+		if not ag.n_atoms:
+			logger.error("the selection %r contains no atoms", args.select)
 			return 1
-		logger.debug("group %r: %d atom(s)", group, n_group)
-
-	if not args.whole and (n_types := n_molecule_types(ag)) > 1:
-		logger.warning("the selection %r contains %d different molecule types; their molecules are written "
-		               "as columns side by side (whole: one column for the selection)", args.select, n_types)
+		for group in args.group: # check the groups before the (long) calculation
+			n_group = ag.select_atoms(group).n_atoms
+			if not n_group:
+				logger.error("the group %r contains no atoms of the selection", group)
+				return 1
+			logger.debug("group %r: %d atom(s)", group, n_group)
+	except SelectionError as error:
+		logger.error("invalid selection: %s", error)
+		return 1
 
 	try:
 		sasa = SASA(ag, cg=args.cg, probe=args.probe, ndots=args.ndots, radii=dict(args.radius) or None,
@@ -301,6 +341,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 	except ValueError as error: # e.g. unknown elements
 		logger.error("%s", error)
 		return 1
+	if not args.whole and len(sasa.types) > 1:
+		logger.warning("the selection %r contains %d different molecule types; their molecules are written "
+		               "as columns side by side (whole: one column for the selection)", args.select, len(sasa.types))
 	surface = _surface_options(args, sasa) if args.surface else None
 	if surface is False:
 		return 1
@@ -310,9 +353,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 	sasa.run(start=args.start, stop=args.stop, step=args.step, verbose=not args.quiet)
 
 	columns, labels = _columns(sasa, args)
-	output = Path(args.output)
-	if output.suffix == '.npz':
-		np.savez(output, times=sasa.times, frames=sasa.frames, sasa=columns, labels=np.array(labels))
+	output.parent.mkdir(parents=True, exist_ok=True)
+	if output.suffix.lower() == '.npz':
+		with open(output, 'wb') as out: # a file object: np.savez would append .npz to e.g. x.NPZ
+			np.savez(out, times=sasa.times, frames=sasa.frames, sasa=columns, labels=np.array(labels))
 	else:
 		command = 'fastsasa ' + shlex.join(sys.argv[1:] if argv is None else argv)
 		_write_xvg(output, sasa.times, columns, labels, command)

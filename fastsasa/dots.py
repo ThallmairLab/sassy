@@ -106,6 +106,8 @@ def unit_dots(ndots: int) -> np.ndarray:
 	At least ndots dots: whichever scheme gives fewer dots >= ndots
 	The array is cached and read-only.
 	"""
+	if ndots < 1:
+		raise ValueError(f"The number of dots per atom must be >= 1, got {ndots}.")
 	arc, dod = ico_dot_arc(ndots), ico_dot_dod(ndots)
 	unit = arc if len(arc) <= len(dod) else dod
 	unit.flags.writeable = False

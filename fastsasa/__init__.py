@@ -17,17 +17,21 @@ atomistic systems, a bead in coarse-grained ones.
 >>> sasa = SASA(u.select_atoms('moltype GSH')).run()   # (n_molecules, n_frames), nm^2
 """
 from .dots import unit_dots, ico_dot_arc, ico_dot_dod
-from .engine import surface_dots
+from .engine import surface_dots, warn_coincident
 from .groups import copy_length, molecule_index, molecule_labels, molecule_types, n_molecule_types, split_molecules
 from .radii import AA_RADII, CG_RADII, PROBE_RADIUS, atom_radii, atom_symbols, radii_remarks
 from .sasa import N_DOTS, SASA
 from .units import to_angstrom, to_nm
 from .surface import SURFACE_DOTS, Surface, STATISTICS, best_matching_frame, closest_to, generate_surface
 
-__version__ = "0.1.0"
+import importlib.metadata
+try: # the version of pyproject.toml, from the installed package metadata
+	__version__ = importlib.metadata.version("fastsasa")
+except importlib.metadata.PackageNotFoundError: # run from the source tree without installing
+	__version__ = "0+unknown"
 
 __all__ = [
-	"SASA", "N_DOTS", "surface_dots", "to_nm", "to_angstrom",
+	"SASA", "N_DOTS", "surface_dots", "warn_coincident", "to_nm", "to_angstrom",
 	"Surface", "SURFACE_DOTS", "STATISTICS", "best_matching_frame", "closest_to", "generate_surface",
 	"unit_dots", "ico_dot_arc", "ico_dot_dod",
 	"copy_length", "molecule_index", "molecule_labels", "molecule_types", "n_molecule_types", "split_molecules",
