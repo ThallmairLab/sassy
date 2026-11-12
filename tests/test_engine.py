@@ -4,8 +4,8 @@ import pytest
 
 import logging
 
-from fastsasa import unit_dots, surface_dots
-from fastsasa.engine import _exposed_counts, _exposed_dots
+from sassy import unit_dots, surface_dots
+from sassy.engine import _exposed_counts, _exposed_dots
 
 
 def test_single_sphere():
@@ -96,12 +96,12 @@ def test_coincident_warning(caplog):
     neither buries the other); not if one has radius 0 or they are in different blocks.
     """
     xyz = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.3, 0.0, 0.0]])
-    with caplog.at_level(logging.WARNING, logger='fastsasa'):
+    with caplog.at_level(logging.WARNING, logger='sassy'):
         surface_dots(xyz, [0.2, 0.2, 0.2], ndots=240)
     assert '1 pair(s) of atoms with a non-zero radius share an identical position' in caplog.text
     assert 'atom 0/atom 1' in caplog.text
     caplog.clear()
-    with caplog.at_level(logging.WARNING, logger='fastsasa'):
+    with caplog.at_level(logging.WARNING, logger='sassy'):
         surface_dots(xyz, [0.2, 0.0, 0.2], ndots=240)
         surface_dots(xyz, [0.2, 0.2, 0.2], ndots=240, block=[0, 1, 0])
     assert 'identical position' not in caplog.text

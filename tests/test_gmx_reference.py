@@ -1,7 +1,7 @@
 """
 Comparison with gmx sasa (GROMACS 2024.5) on atomistic GSH, all 501 frames.
 
-The reference was made with the radii of fastsasa (gmx_vdwradii.dat, copied to
+The reference was made with the radii of sassy (gmx_vdwradii.dat, copied to
 vdwradii.dat in the working directory) and
 
     gmx sasa -s atomistic.tpr -f atomistic.xtc -surface all -probe 0.191 -ndots 4800 -o gmx_sasa_area.xvg
@@ -9,12 +9,12 @@ vdwradii.dat in the working directory) and
 import numpy as np
 import MDAnalysis as mda
 
-from fastsasa import AA_RADII, SASA
+from sassy import AA_RADII, SASA
 from conftest import DATA
 
 
 def test_radii_file_matches():
-    """The reference used the radii of fastsasa."""
+    """The reference used the radii of sassy."""
     radii = {line.split()[1]: float(line.split()[2])
              for line in (DATA / 'gmx_vdwradii.dat').read_text().splitlines()}
     assert radii == AA_RADII

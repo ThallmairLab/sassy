@@ -1,5 +1,5 @@
 """
-Length units. MDAnalysis gives and takes coordinates in Å; fastsasa works in nm
+Length units. MDAnalysis gives and takes coordinates in Å; sassy works in nm
 throughout. Coordinates are converted with :func:`to_nm` as soon as they are read
 from MDAnalysis, and back with :func:`to_angstrom` only where they are handed to
 MDAnalysis again (e.g. for writing a file).

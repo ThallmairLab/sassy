@@ -4,10 +4,10 @@ import pytest
 
 import MDAnalysis as mda
 
-from fastsasa import SASA
-from fastsasa.plots import (BIN_WIDTH, MAX_SERIES, Highlight, atom_sasa_at, distribution, pooled_atom_sasa,
+from sassy import SASA
+from sassy.plots import (BIN_WIDTH, MAX_SERIES, Highlight, atom_sasa_at, distribution, pooled_atom_sasa,
                             save_plots)
-from fastsasa.bin.fastsasa import main
+from sassy.bin.sassy import main
 from conftest import DATA
 
 TPR, XTC = str(DATA / 'atomistic.tpr'), str(DATA / 'atomistic.xtc')
@@ -68,7 +68,7 @@ def test_save_plots_highlight(tmp_path, monkeypatch):
     # the dot: on the series at the time of the frame
     files = save_plots(tmp_path / 'dot', times, values, highlight=highlight)
     assert any(f.name == 'sasa_time.png' for f in files)
-    from fastsasa.plots import plot_time
+    from sassy.plots import plot_time
     dots = []
     original_plot = Axes.plot
     monkeypatch.setattr(Axes, 'plot', lambda ax, *a, **kw: (dots.append(a) if kw.get('marker') == 'o' else None)
@@ -171,7 +171,7 @@ def test_cli_plots(tmp_path, capsys, monkeypatch):
 
 def test_cli_plots_surface(tmp_path, monkeypatch):
     """The frame of the surface is highlighted in the plots."""
-    import fastsasa.plots as plots
+    import sassy.plots as plots
     seen = []
     original = plots.save_plots
     monkeypatch.setattr(plots, 'save_plots', lambda *a, **kw: seen.append(kw['highlight']) or original(*a, **kw))

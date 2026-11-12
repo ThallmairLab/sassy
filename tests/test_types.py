@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 import MDAnalysis as mda
 
-from fastsasa import SASA, molecule_index, molecule_labels, molecule_types, n_molecule_types
-from fastsasa.plots import Highlight, save_plots
+from sassy import SASA, molecule_index, molecule_labels, molecule_types, n_molecule_types
+from sassy.plots import Highlight, save_plots
 
 
 def mixed(gsh, types=('GSH', 'GSX', 'GSH'), molnums=True, bonds=True):
@@ -84,7 +84,7 @@ def test_plots_by_type(tmp_path, monkeypatch):
     labels = molecule_labels(types)
     highlight = Highlight(time=100.0, sasa=float(values[3, 10]), series=3, label='surface frame 10 (SOL2)')
     marks = {}
-    from fastsasa import plots
+    from sassy import plots
     panels = plots.plot_distribution_panels
     monkeypatch.setattr(plots, 'plot_distribution_panels',
                         lambda v, f, l, **kw: marks.update(labels=l, marks=kw['marks'], colors=kw['colors'])
@@ -114,7 +114,7 @@ def test_plots_by_type(tmp_path, monkeypatch):
 
 def test_time_panels_by_type(tmp_path, monkeypatch):
     """sasa_time: one panel per type stacked vertically; the dot in the panel of its molecule."""
-    from fastsasa import plots
+    from sassy import plots
     figures = []
     save = plots._save
     monkeypatch.setattr(plots, '_save', lambda fig, fname: figures.append(fig) or save(fig, fname))
@@ -156,7 +156,7 @@ def test_surface_per_type(gsh_aa, tmp_path):
         values = sasa.get_type_sasa(name)
         for statistic in ('median', 'mean', 'q3'):
             molecule, frame, target = sasa.representative(name, statistic)
-            from fastsasa.surface import STATISTICS
+            from sassy.surface import STATISTICS
             assert target == pytest.approx(STATISTICS[statistic](values.ravel()))
             column = np.flatnonzero(sasa.frames == frame)[0]
             assert molecule in sasa.types[name]
@@ -182,7 +182,7 @@ def test_surface_per_type(gsh_aa, tmp_path):
 
 def test_plots_several_highlights(tmp_path, monkeypatch):
     """One highlight per type: each in the panels of its type, labels once in the legends."""
-    from fastsasa import plots
+    from sassy import plots
     calls = []
     panels = plots.plot_distribution_panels
     monkeypatch.setattr(plots, 'plot_distribution_panels',

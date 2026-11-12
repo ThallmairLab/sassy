@@ -150,7 +150,7 @@ def generate_surface(atoms: mda.AtomGroup, radii: ArrayLike | None = None, probe
 
 	# write remarks for the PDB file
 	n_dots = len(unit_dots(int(ndots)))
-	remarks = [f"Structure (ATOM) and solvent accessible surface dots (HETATM), fastsasa {_version()}",
+	remarks = [f"Structure (ATOM) and solvent accessible surface dots (HETATM), sassy {_version()}",
 	           f"Frame {frame}, time {time:g} ps, SASA {area:.3f} nm^2, {n_dots} dots per atom"]
 	if rmsd is not None:
 		remarks.append(f"Superposed onto the reference structure, RMSD {rmsd:.3f} nm")

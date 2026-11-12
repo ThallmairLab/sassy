@@ -2,7 +2,7 @@
 Command line interface: SASA of the molecules, atoms or selections of a
 trajectory, written as an xvg (text) or npz file.
 
-	fastsasa -s topol.tpr -f traj.xtc -select 'moltype GSH' -o sasa.xvg
+	sassy -s topol.tpr -f traj.xtc -select 'moltype GSH' -o sasa.xvg
 """
 import argparse
 import logging
@@ -20,11 +20,11 @@ from ..radii import PROBE_RADIUS
 from ..sasa import N_DOTS, SASA
 from ..surface import STATISTICS, SURFACE_DOTS
 
-logger = logging.getLogger('fastsasa')
+logger = logging.getLogger('sassy')
 
 
 class _Formatter(logging.Formatter):
-	"""Info messages plain, others as ``fastsasa: WARNING: ...``; with ``debug`` as ``time level [module] message``."""
+	"""Info messages plain, others as ``sassy: WARNING: ...``; with ``debug`` as ``time level [module] message``."""
 	def __init__(self, debug: bool = False) -> None:
 		super().__init__()
 		self.debug = debug
@@ -34,14 +34,14 @@ class _Formatter(logging.Formatter):
 		if self.debug:
 			message = f"{self.formatTime(record, '%H:%M:%S')} {record.levelname:7} [{record.name}] {message}"
 		elif record.levelno != logging.INFO:
-			message = f"fastsasa: {record.levelname}: {message}"
+			message = f"sassy: {record.levelname}: {message}"
 		if record.exc_info:
 			message += '\n' + self.formatException(record.exc_info)
 		return message
 
 
 def _setup_logging(verbose: bool, quiet: bool) -> None:
-	"""Log the fastsasa messages to stderr: warnings only (quiet), info (default) or debug (verbose)."""
+	"""Log the sassy messages to stderr: warnings only (quiet), info (default) or debug (verbose)."""
 	level = logging.DEBUG if verbose else logging.WARNING if quiet else logging.INFO
 	for handler in logger.handlers[:]: # main() may run several times (tests, scripts)
 		logger.removeHandler(handler)
@@ -97,7 +97,7 @@ def _statistic(text: str) -> str | float:
 
 def parser() -> argparse.ArgumentParser:
 	p = argparse.ArgumentParser(
-		prog='fastsasa',
+		prog='sassy',
 		description="Shrake-Rupley solvent accessible surface area (nm^2) of a selection over a "
 		            "trajectory. By default every molecule is taken on its own (other molecules "
 		            "do not bury it) and gets its own column; with whole the selection is one "
@@ -282,7 +282,7 @@ def _highlight(sasa: SASA, args: argparse.Namespace, surface):
 
 def _write_xvg(path: Path, times: np.ndarray, columns: np.ndarray, labels: list[str], command: str) -> None:
 	with open(path, 'w') as out:
-		out.write(f"# created by fastsasa {__version__}\n# command: {command}\n")
+		out.write(f"# created by sassy {__version__}\n# command: {command}\n")
 		out.write('@    title "Solvent accessible surface"\n')
 		out.write('@    xaxis  label "Time (ps)"\n')
 		out.write('@    yaxis  label "Area (nm\\S2\\N)"\n')
@@ -304,7 +304,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 			p.error(f"-nt {args.threads}: at most {numba.config.NUMBA_NUM_THREADS} threads available")
 		numba.set_num_threads(args.threads)
 	_setup_logging(args.verbose, args.quiet)
-	logger.debug("fastsasa %s: %s", __version__, ' '.join(sys.argv[1:] if argv is None else argv))
+	logger.debug("sassy %s: %s", __version__, ' '.join(sys.argv[1:] if argv is None else argv))
 	output = Path(args.output)
 	if output.suffix.lower() not in ('.xvg', '.npz'):
 		logger.warning("output %s: unknown extension, written as xvg (text); use .xvg or .npz", output)
@@ -358,7 +358,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 		with open(output, 'wb') as out: # a file object: np.savez would append .npz to e.g. x.NPZ
 			np.savez(out, times=sasa.times, frames=sasa.frames, sasa=columns, labels=np.array(labels))
 	else:
-		command = 'fastsasa ' + shlex.join(sys.argv[1:] if argv is None else argv)
+		command = 'sassy ' + shlex.join(sys.argv[1:] if argv is None else argv)
 		_write_xvg(output, sasa.times, columns, labels, command)
 	logger.info("wrote %d column(s) x %d frame(s) to %s", len(labels), len(sasa.frames), output)
 

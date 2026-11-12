@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from fastsasa import SASA, atom_radii, atom_symbols, split_molecules, surface_dots, to_nm
+from sassy import SASA, atom_radii, atom_symbols, split_molecules, surface_dots, to_nm
 
 
 def test_sasa_class(gsh_aa):
@@ -227,7 +227,7 @@ def test_molecule_copies(resids, expected):
     Without molnums, molecules are the shortest repeating unit of atom names,
     residue names and resids (up to an offset).
     """
-    from fastsasa import copy_length, molecule_index
+    from sassy import copy_length, molecule_index
     universe = _topology(['N', 'C'] * 6, ['ALA', 'ALA', 'GLY', 'GLY'] * 3, resids)
     assert molecule_index(universe.atoms).tolist() == expected
     assert copy_length(universe.atoms) == expected.count(0)
@@ -238,7 +238,7 @@ def test_molecule_copies_special():
     Single residues repeat on their own, a non-repeating group is one molecule,
     differing atom names prevent copies, and molnums take precedence.
     """
-    from fastsasa import molecule_index
+    from sassy import molecule_index
     water = _topology(['OW', 'HW1', 'HW2'] * 4, ['SOL'] * 12, np.repeat([1, 2, 3, 4], 3))
     assert molecule_index(water.atoms).tolist() == np.repeat([0, 1, 2, 3], 3).tolist()
     protein = _topology(['N', 'CA', 'N', 'CA', 'N', 'CB'], ['ALA', 'ALA', 'ALA', 'ALA', 'SER', 'SER'],
@@ -273,7 +273,7 @@ def test_cg_radii():
     small, dummy, or regular for everything else. Dummy beads have no SASA.
     """
     import MDAnalysis as mda
-    from fastsasa import CG_RADII, atom_symbols
+    from sassy import CG_RADII, atom_symbols
     universe = mda.Universe.empty(5, n_residues=1, atom_resindex=[0] * 5, trajectory=True)
     universe.add_TopologyAttr('types', ['TC6', 'SQ5n', 'P2', 'Q4p', 'U'])
     universe.add_TopologyAttr('names', ['A', 'B', 'C', 'D', 'E'])
@@ -338,7 +338,7 @@ def test_sasa_coincident_warning(gsh_aa, caplog):
     coordinates = gsh_aa.universe.trajectory.coordinate_array
     coordinates[:3, 1] = coordinates[:3, 0] # atom 1 on atom 0 in the first 3 frames
     sasa = SASA(gsh_aa, ndots=240, max_frame_atoms=gsh_aa.n_atoms * 2) # several blocks
-    with caplog.at_level(logging.WARNING, logger='fastsasa'):
+    with caplog.at_level(logging.WARNING, logger='sassy'):
         sasa.run()
     records = [r for r in caplog.records if 'identical position' in r.getMessage()]
     assert len(records) == 1
@@ -349,7 +349,7 @@ def test_sasa_coincident_warning(gsh_aa, caplog):
 
 def test_molecule_members():
     """molecule_members groups the atoms of every molecule as a boolean mask per molecule would."""
-    from fastsasa.groups import molecule_members
+    from sassy.groups import molecule_members
     molecules = np.array([0, 0, 2, 1, 2, 0, 1])
     members = molecule_members(molecules)
     assert [m.tolist() for m in members] == [np.flatnonzero(molecules == i).tolist() for i in range(3)]
@@ -360,15 +360,15 @@ def test_single_residue_no_warning(caplog):
     """A single non-repeating residue without molnums or bonds is one molecule, without a warning."""
     import logging
     import MDAnalysis as mda
-    from fastsasa import molecule_index
+    from sassy import molecule_index
     universe = mda.Universe.empty(3, n_residues=1, atom_resindex=[0, 0, 0], trajectory=True)
     universe.add_TopologyAttr('names', ['C1', 'O1', 'N1'])
-    with caplog.at_level(logging.WARNING, logger='fastsasa'):
+    with caplog.at_level(logging.WARNING, logger='sassy'):
         assert molecule_index(universe.atoms).tolist() == [0, 0, 0]
     assert 'no molecules found' not in caplog.text
 
 
 def test_units_round_trip():
     """nm -> Å multiplies by 10 exactly."""
-    from fastsasa import to_angstrom
+    from sassy import to_angstrom
     assert to_angstrom(0.3) == 3.0

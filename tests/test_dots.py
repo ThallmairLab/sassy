@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from fastsasa import unit_dots
+from sassy import unit_dots
 
 
 @pytest.mark.parametrize('ndots, expected', [(24, 32), (50, 92), (100, 122), (240, 252)])

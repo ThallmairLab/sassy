@@ -3,8 +3,8 @@ import numpy as np
 import pytest
 import MDAnalysis as mda
 
-from fastsasa import SASA
-from fastsasa.bin.fastsasa import main
+from sassy import SASA
+from sassy.bin.sassy import main
 from conftest import DATA
 
 TPR, XTC = str(DATA / 'atomistic.tpr'), str(DATA / 'atomistic.xtc')
@@ -100,7 +100,7 @@ def test_cli_whole_selection(tmp_path):
 @pytest.mark.filterwarnings('ignore::UserWarning') # MDAnalysis writing and reading the PDB
 def test_cli_molecule_types_warning(tmp_path, capsys):
     """Per molecule (default) warns about a selection of several molecule types, -whole does not."""
-    from fastsasa import n_molecule_types
+    from sassy import n_molecule_types
     gsh = mda.Universe(TPR, XTC).select_atoms('moltype GSH')
     assert n_molecule_types(gsh) == 1
     two = mda.Merge(gsh, gsh)
@@ -138,13 +138,13 @@ def test_cli_logging(tmp_path, capsys):
     assert 'DEBUG' not in err
     assert main(run + ['-v']) == 0
     err = capsys.readouterr().err
-    assert 'DEBUG   [fastsasa.groups] molecules from the molnums' in err
+    assert 'DEBUG   [sassy.groups] molecules from the molnums' in err
     assert 'radii (nm) used' in err and 'frames/s' in err
     with pytest.raises(SystemExit):
         main(run + ['-v', '-q'])
     # errors of the SASA setup are logged, not raised
     assert main(run + ['-q', '-radius', 'C=-1']) == 1
-    assert 'fastsasa: ERROR: Radii must be >= 0' in capsys.readouterr().err
+    assert 'sassy: ERROR: Radii must be >= 0' in capsys.readouterr().err
 
 
 def test_cli_frames(tmp_path):
@@ -159,11 +159,11 @@ def test_cli_input_errors(tmp_path, capsys):
     out = str(tmp_path / 'x.xvg')
     run = ['-s', TPR, '-f', XTC, '-e', '1', '-ndots', '240', '-o', out]
     assert main(['-s', str(tmp_path / 'missing.tpr'), '-o', out]) == 1
-    assert 'fastsasa: ERROR: cannot read' in capsys.readouterr().err
+    assert 'sassy: ERROR: cannot read' in capsys.readouterr().err
     assert main(run + ['-select', 'nonsense ((']) == 1
-    assert 'fastsasa: ERROR: invalid selection' in capsys.readouterr().err
+    assert 'sassy: ERROR: invalid selection' in capsys.readouterr().err
     assert main(run + ['-group', 'name ((']) == 1
-    assert 'fastsasa: ERROR: invalid selection' in capsys.readouterr().err
+    assert 'sassy: ERROR: invalid selection' in capsys.readouterr().err
     assert main(run + ['-surface', str(tmp_path), '-surface-ref', str(tmp_path / 'missing.pdb')]) == 1
     assert 'cannot read the reference structure' in capsys.readouterr().err
     for bad in (['-ndots', '0'], ['-probe', '-0.1'], ['-skip', '0'], ['-surface-ndots', '-5'],
@@ -187,7 +187,7 @@ def test_cli_output_formats(tmp_path, capsys):
 
 def test_xvg_quoted_labels(tmp_path):
     """A double quote in a label does not end the legend string."""
-    from fastsasa.bin.fastsasa import _write_xvg
+    from sassy.bin.sassy import _write_xvg
     out = tmp_path / 'x.xvg'
-    _write_xvg(out, np.arange(2.0), np.ones((1, 2)), ['name "SG"'], 'fastsasa')
+    _write_xvg(out, np.arange(2.0), np.ones((1, 2)), ['name "SG"'], 'sassy')
     assert read_xvg(out)[1] == ["name 'SG'"]

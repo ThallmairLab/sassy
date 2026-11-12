@@ -1,5 +1,5 @@
 """
-fastsasa: solvent accessible surface areas (SASA)
+sassy: solvent accessible surface areas (SASA)
 for every molecule, or every atom, of an MDAnalysis AtomGroup over a trajectory.
 
 Every atom is a sphere of its van der Waals radius plus the probe radius,
@@ -12,7 +12,7 @@ As in MDAnalysis, "atom" means every particle of the AtomGroup: an atom in
 atomistic systems, a bead in coarse-grained ones.
 
 >>> import MDAnalysis as mda
->>> from fastsasa import SASA
+>>> from sassy import SASA
 >>> u = mda.Universe('topol.tpr', 'traj.xtc')
 >>> sasa = SASA(u.select_atoms('moltype GSH')).run()   # (n_molecules, n_frames), nm^2
 """
@@ -26,7 +26,7 @@ from .surface import SURFACE_DOTS, Surface, STATISTICS, best_matching_frame, clo
 
 import importlib.metadata
 try: # the version of pyproject.toml, from the installed package metadata
-	__version__ = importlib.metadata.version("fastsasa")
+	__version__ = importlib.metadata.version("sassy")
 except importlib.metadata.PackageNotFoundError: # run from the source tree without installing
 	__version__ = "0+unknown"
 
