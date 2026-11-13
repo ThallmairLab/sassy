@@ -7,7 +7,7 @@ The functions take plain arrays, so they work for molecules, groups or atoms ali
 ``values`` is (n_series, n_frames) SASA in nm^2 and ``times`` (n_frames,) in ps.
 
 	>>> res = sasa.run()
-	>>> save_plots('plots', res.times, res.bodies, res.body_labels, total=res.total, types=res.body_types)
+	>>> save_plots('plots', res.times, res.body_sasa, res.body_labels, total=res.total_sasa, types=res.body_type_labels)
 """
 import logging
 from dataclasses import dataclass, replace
@@ -427,7 +427,7 @@ def _with_radius(sasa, body: int) -> np.ndarray:
 
 def _atoms(sasa) -> np.ndarray:
 	"""(n_atoms, n_frames) SASA of every atom of the last run; RuntimeError if not kept."""
-	atoms = sasa._check_run().atoms
+	atoms = sasa._check_run().atom_sasa
 	if atoms is None:
 		raise RuntimeError("The SASA of every atom was not kept (keep_atoms=False).")
 	return atoms
@@ -438,7 +438,7 @@ def pooled_atom_sasa(sasa) -> tuple[list[str], list[np.ndarray]]:
 	SASA of every atom of a body type, pooled over all bodies of that type: the first
 	atom of every GSH together, the second together, ...
 
-	Molecules are of one type (:attr:`SASA.types`) if they have the same moltype (tpr), else
+	Molecules are of one type (:attr:`SASA.body_type_indices`) if they have the same moltype (tpr), else
 	the same atom and residue names in the same order (with ``bodies='residue'``: residues of
 	one residue type); with ``bodies='selection'`` (one body) every atom is on its own. Atoms
 	without a radius (dummy beads, virtual sites: no SASA) are left out. Needs the per-atom
@@ -458,9 +458,9 @@ def pooled_atom_sasa(sasa) -> tuple[list[str], list[np.ndarray]]:
 	"""
 	atoms = _atoms(sasa)
 	labels, pooled = [], []
-	for name, bodies in sasa.types.items():
+	for name, bodies in sasa.body_type_indices.items():
 		members = np.stack([sasa._members[i] for i in bodies], axis=1) # (n_atoms, n_bodies) indices in ag
-		prefix = f"{name} " if len(sasa.types) > 1 else ''
+		prefix = f"{name} " if len(sasa.body_type_indices) > 1 else ''
 		kept = _with_radius(sasa, bodies[0]) # the same for all bodies of the type
 		stacked = atoms[members[kept]] # (n_kept, n_bodies, n_frames)
 		for atom, series in zip(sasa.ag[members[kept, 0]], stacked):
@@ -493,7 +493,7 @@ def atom_sasa_at(sasa, body: int, frame: int) -> dict[int, float]:
 		return {}
 	body %= sasa.n_bodies
 	offset = 0
-	for bodies in sasa.types.values():
+	for bodies in sasa.body_type_indices.values():
 		kept = _with_radius(sasa, bodies[0])
 		if body in bodies:
 			values = atoms[sasa._members[body][kept], analysed[0]]
@@ -535,7 +535,7 @@ def save_plots(directory: str | Path, times: ArrayLike, values: ArrayLike, label
 		``highlight.series``) in ``sasa_distribution`` and the panel of that series, and at
 		the SASA of every atom (``highlight.atoms``) in its per-atom panel
 	types : list of str, optional
-		type of every series (e.g. :attr:`Results.body_types`): with several types,
+		type of every series (e.g. :attr:`Results.body_type_labels`): with several types,
 		``sasa_distribution`` has one panel per type (pooled over its series, each zoomed to
 		its range), ``sasa_time`` one panel per type stacked vertically (the first 25 types
 		each), and the per-series panels are ordered and colored by type

@@ -87,7 +87,7 @@ def test_pooled_atom_sasa(gsh_aa):
     three.add_TopologyAttr('moltypes', ['GSH', 'GSH', 'GSX'])
     three.load_new(np.concatenate([positions, positions + 50.0, positions + 100.0], axis=1), order='fac')
     sasa = SASA(three.atoms, ndots=240)
-    per_atom = sasa.run(step=4).atoms
+    per_atom = sasa.run(step=4).atom_sasa
     n, n_frames = gsh_aa.n_atoms, len(sasa.results.frames)
     labels, pooled = pooled_atom_sasa(sasa)
     assert len(labels) == len(pooled) == 2 * n # GSH (2 molecules), GSX (1)

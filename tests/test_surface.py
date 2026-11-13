@@ -74,7 +74,7 @@ def test_surface_area_and_frame(gsh_aa, tmp_path):
     sasa = SASA(gsh_aa, ndots=240)
     with pytest.raises(RuntimeError, match='run'):
         sasa.write_surface(tmp_path / 'x.pdb')
-    series = sasa.run(step=2).bodies[0]
+    series = sasa.run(step=2).body_sasa[0]
     surface = sasa.write_surface(tmp_path / 'x.pdb', return_surface=True)
     assert surface.frame == sasa.results.frames[closest_to(series)]
     assert surface.area == pytest.approx(series[closest_to(series)], rel=1e-6)

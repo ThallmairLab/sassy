@@ -244,12 +244,12 @@ def _surface_options(args: argparse.Namespace, sasa: SASA) -> list[dict] | bool:
 		logger.debug("surface of body %d (%s)", body, labels[body])
 		jobs = [dict(common, body=body, fname=_surface_file(args.surface, labels[body]))]
 	else:
-		jobs = [dict(common, body_type=name, fname=_surface_file(args.surface, name)) for name in sasa.types]
+		jobs = [dict(common, body_type=name, fname=_surface_file(args.surface, name)) for name in sasa.body_type_indices]
 
 	if args.surface_ref is not None:
 		if len(jobs) > 1:
 			logger.error("-surface-ref needs a single surface: the selection holds %d body types (%s); "
-			             "give -surface-body", len(jobs), ', '.join(sasa.types))
+			             "give -surface-body", len(jobs), ', '.join(sasa.body_type_indices))
 			return False
 		try:
 			reference = mda.Universe(args.surface_ref).atoms
@@ -257,7 +257,7 @@ def _surface_options(args: argparse.Namespace, sasa: SASA) -> list[dict] | bool:
 			logger.error("cannot read the reference structure %s: %s", args.surface_ref, error)
 			return False
 		job = jobs[0]
-		body = job['body'] if 'body' in job else int(sasa.types[job['body_type']][0])
+		body = job['body'] if 'body' in job else int(sasa.body_type_indices[job['body_type']][0])
 		n_atoms = sasa.body_atoms(body).n_atoms
 		if reference.n_atoms != n_atoms:
 			logger.error("the reference structure %s has %d atoms, but the surface (%s) has %d", args.surface_ref,
@@ -287,7 +287,7 @@ def _highlight(sasa: SASA, args: argparse.Namespace, surface):
 		if not len(analysed):
 			logger.debug("surface frame %d was not analysed: marked in the time plots only", surface.frame)
 		return Highlight(time=surface.time, label=label)
-	return Highlight(time=surface.time, sasa=float(sasa.results.bodies[series, analysed[0]]),
+	return Highlight(time=surface.time, sasa=float(sasa.results.body_sasa[series, analysed[0]]),
 	                 series=series, label=label,
 	                 atoms=atom_sasa_at(sasa, series, surface.frame) if 'atoms' in _levels(args) else None)
 
@@ -359,10 +359,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 	except ValueError as error: # e.g. unknown elements, environment overlapping the selection
 		logger.error("%s", error)
 		return 1
-	if sasa.bodies == 'molecule' and len(sasa.types) > 1:
+	if sasa.bodies == 'molecule' and len(sasa.body_type_indices) > 1:
 		logger.warning("the selection %r contains %d different molecule types; their molecules are written "
 		               "as columns side by side (-bodies selection: one column for the selection)", args.select,
-		               len(sasa.types))
+		               len(sasa.body_type_indices))
 	surface = _surface_options(args, sasa) if args.surface else None
 	if surface is False:
 		return 1
@@ -399,11 +399,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 			series_labels, values = results.table((), args.group)
 		else:
 			kind = {'molecule': 'molecule', 'residue': 'residue', 'selection': 'whole'}[sasa.bodies]
-			series_labels, values = results.body_labels, results.bodies
+			series_labels, values = results.body_labels, results.body_sasa
 		atom_labels, atoms = pooled_atom_sasa(sasa) if 'atoms' in _levels(args) else (None, None)
-		save_plots(args.plots, results.times, values, series_labels, total=results.total, kind=kind,
+		save_plots(args.plots, results.times, values, series_labels, total=results.total_sasa, kind=kind,
 		           atoms=atoms, atom_labels=atom_labels, highlight=highlights,
-		           types=results.body_types if kind in ('molecule', 'residue') else None)
+		           types=results.body_type_labels if kind in ('molecule', 'residue') else None)
 	return status
 
 

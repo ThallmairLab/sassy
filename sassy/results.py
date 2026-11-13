@@ -10,7 +10,7 @@ import numpy as np
 from numpy.typing import ArrayLike
 import MDAnalysis as mda
 
-from .groups import type_members
+from .groups import body_type_indices
 
 COLUMNS = ('bodies', 'total', 'types', 'atoms') # the levels of Results.table
 
@@ -44,13 +44,13 @@ class Results:
 	----------
 	times, frames : np.ndarray
 		(n_frames,) times (ps) and trajectory frames
-	bodies : np.ndarray
+	body_sasa : np.ndarray
 		(n_bodies, n_frames) SASA of every body
 	body_labels : list of str
 		(n_bodies,) unique label of every body (e.g. GSH2, ALA12, 'selection')
-	body_types : list of str
+	body_type_labels : list of str
 		(n_bodies,) type of every body (e.g. GSH, ALA, 'selection')
-	atoms : np.ndarray or None
+	atom_sasa : np.ndarray or None
 		(n_atoms, n_frames) SASA of every atom of the AtomGroup, in its order; atoms with
 		radius 0 have SASA 0; None if not kept (``keep_atoms=False``)
 	atom_labels : list of str or None
@@ -62,35 +62,35 @@ class Results:
 	Examples
 	--------
 	>>> res = SASA(u.select_atoms('moltype GSH')).run()
-	>>> res.total                 # (n_frames,)
-	>>> res.bodies, res.body_labels    # (n_bodies, n_frames), ['GSH1', 'GSH2', ...]
-	>>> res.body('GSH2')          # (n_frames,)
-	>>> res.by_type()             # {'GSH': (n_frames,), ...}
+	>>> res.total_sasa                 # (n_frames,)
+	>>> res.body_sasa, res.body_labels # (n_bodies, n_frames), ['GSH1', 'GSH2', ...]
+	>>> res.body('GSH2')               # (n_frames,)
+	>>> res.type_sasa()                # {'GSH': (n_frames,), ...}
 	>>> res.select('name S*')     # (n_frames,) summed over the selected atoms
 	>>> res.table(['bodies', 'total'])  # labels and (n_columns, n_frames) values
 	"""
 	times: np.ndarray
 	frames: np.ndarray
-	bodies: np.ndarray
+	body_sasa: np.ndarray
 	body_labels: list[str]
-	body_types: list[str]
-	atoms: np.ndarray | None = None
+	body_type_labels: list[str]
+	atom_sasa: np.ndarray | None = None
 	atom_labels: list[str] | None = None
 	ag: mda.AtomGroup | None = field(default=None, compare=False)
 
 	def __post_init__(self) -> None:
 		self.times = np.asarray(self.times, dtype=float)
 		self.frames = np.asarray(self.frames, dtype=int)
-		self.bodies = np.asarray(self.bodies, dtype=float).reshape(len(self.body_labels), len(self.frames))
-		self.body_labels, self.body_types = list(self.body_labels), list(self.body_types)
-		if self.atoms is not None:
-			self.atoms = np.asarray(self.atoms, dtype=float).reshape(-1, len(self.frames))
+		self.body_sasa = np.asarray(self.body_sasa, dtype=float).reshape(len(self.body_labels), len(self.frames))
+		self.body_labels, self.body_type_labels = list(self.body_labels), list(self.body_type_labels)
+		if self.atom_sasa is not None:
+			self.atom_sasa = np.asarray(self.atom_sasa, dtype=float).reshape(-1, len(self.frames))
 		if self.atom_labels is not None:
 			self.atom_labels = list(self.atom_labels)
 
 	def __repr__(self) -> str:
-		types = ', '.join(f"{name} x{len(indices)}" for name, indices in self.types.items())
-		atoms = f"{len(self.atoms)} atoms" if self.atoms is not None else "no atoms kept"
+		types = ', '.join(f"{name} x{len(indices)}" for name, indices in self.body_type_indices.items())
+		atoms = f"{len(self.atom_sasa)} atoms" if self.atom_sasa is not None else "no atoms kept"
 		bodies = 'body' if self.n_bodies == 1 else 'bodies'
 		return f"<Results: {self.n_bodies} {bodies} ({types}), {self.n_frames} frames, {atoms}>"
 
@@ -103,14 +103,14 @@ class Results:
 		return len(self.frames)
 
 	@property
-	def total(self) -> np.ndarray:
+	def total_sasa(self) -> np.ndarray:
 		"""(n_frames,) SASA of all bodies together."""
-		return self.bodies.sum(axis=0)
+		return self.body_sasa.sum(axis=0)
 
 	@property
-	def types(self) -> dict[str, np.ndarray]:
+	def body_type_indices(self) -> dict[str, np.ndarray]:
 		"""Body indices of every type, in the order of first appearance: {type: indices}."""
-		return type_members(self.body_types)
+		return body_type_indices(self.body_type_labels)
 
 	# bodies
 	def body_index(self, body: int | str) -> int:
@@ -123,21 +123,21 @@ class Results:
 		indices: (n_frames,) for one body, else (n_indices, n_frames).
 		"""
 		if isinstance(body, (str, int, np.integer)):
-			return self.bodies[self.body_index(body)]
+			return self.body_sasa[self.body_index(body)]
 		index = np.asarray(body)
 		if not np.issubdtype(index.dtype, np.integer):
 			raise TypeError(f"Body indices must be integers, got {index.dtype}.")
 		if ((index < -self.n_bodies) | (index >= self.n_bodies)).any():
 			raise IndexError(f"Body index out of range for {self.n_bodies} body(ies): {index.tolist()}.")
-		return self.bodies[index]
+		return self.body_sasa[index]
 
-	def by_type(self, per_body: bool = False) -> dict[str, np.ndarray]:
+	def type_sasa(self, per_body: bool = False) -> dict[str, np.ndarray]:
 		"""
-		SASA of every body type (see :attr:`types`): summed over its bodies (n_frames,), or
+		SASA of every body type (see :attr:`body_type_indices`): summed over its bodies (n_frames,), or
 		with ``per_body`` the SASA of each of them (n_bodies_of_type, n_frames).
 		"""
-		return {name: self.bodies[indices] if per_body else self.bodies[indices].sum(axis=0)
-		        for name, indices in self.types.items()}
+		return {name: self.body_sasa[indices] if per_body else self.body_sasa[indices].sum(axis=0)
+		        for name, indices in self.body_type_indices.items()}
 
 	# atoms
 	def _atom_indices(self, selection: str | mda.AtomGroup | ArrayLike) -> np.ndarray:
@@ -183,10 +183,10 @@ class Results:
 			selection string applied to the atoms (e.g. ``'name S*'``), an AtomGroup whose
 			atoms are all among them, or indices in the atoms
 		"""
-		if self.atoms is None:
+		if self.atom_sasa is None:
 			raise RuntimeError("The SASA of every atom was not kept (keep_atoms=False): only the bodies "
 			                   "and the total are available.")
-		values = self.atoms[self._atom_indices(selection)]
+		values = self.atom_sasa[self._atom_indices(selection)]
 		return values if per_atom else values.sum(axis=0)
 
 	# tables
@@ -215,19 +215,19 @@ class Results:
 		for column in columns:
 			if column == 'bodies':
 				labels += self.body_labels
-				values += list(self.bodies)
+				values += list(self.body_sasa)
 			elif column == 'total':
 				labels.append('total')
-				values.append(self.total)
+				values.append(self.total_sasa)
 			elif column == 'types':
-				for name, value in self.by_type().items():
+				for name, value in self.type_sasa().items():
 					labels.append(name)
 					values.append(value)
 			elif column == 'atoms':
-				if self.atoms is None:
+				if self.atom_sasa is None:
 					raise RuntimeError("The SASA of every atom was not kept (keep_atoms=False).")
 				labels += self.atom_labels
-				values += list(self.atoms)
+				values += list(self.atom_sasa)
 			else:
 				raise ValueError(f"Unknown column {column!r}; columns: {', '.join(COLUMNS)}.")
 		for group in groups:
@@ -243,10 +243,10 @@ class Results:
 def _difference(minuend: Results, subtrahend: Results) -> Results:
 	"""Element-wise ``minuend - subtrahend`` (e.g. the buried area: free minus covered)."""
 	atoms = None
-	if minuend.atoms is not None and subtrahend.atoms is not None:
-		atoms = minuend.atoms - subtrahend.atoms
-	return Results(minuend.times, minuend.frames, minuend.bodies - subtrahend.bodies, minuend.body_labels,
-	               minuend.body_types, atoms, minuend.atom_labels, minuend.ag)
+	if minuend.atom_sasa is not None and subtrahend.atom_sasa is not None:
+		atoms = minuend.atom_sasa - subtrahend.atom_sasa
+	return Results(minuend.times, minuend.frames, minuend.body_sasa - subtrahend.body_sasa, minuend.body_labels,
+	               minuend.body_type_labels, atoms, minuend.atom_labels, minuend.ag)
 
 
 @dataclass(repr=False)
@@ -277,20 +277,20 @@ def save(fname: str | Path, results: Results, free: Results | None = None, meta:
 	"""
 	Save results to an npz file, readable with :func:`load` (and with ``numpy.load``).
 
-	Keys: ``times``, ``frames``, ``body_labels``, ``body_types``, ``bodies`` (n_bodies, n_frames),
-	``total``; with the per-atom SASA ``atoms``, ``atom_labels`` and ``atom_indices`` (universe
+	Keys: ``times``, ``frames``, ``body_labels``, ``body_type_labels``, ``body_sasa`` (n_bodies,
+	n_frames), ``total_sasa``; with the per-atom SASA ``atom_sasa``, ``atom_labels`` and ``atom_indices`` (universe
 	indices); with ``free`` the same arrays prefixed ``free_``; ``meta`` (JSON); with a
 	``table`` (labels, values) ``columns`` and ``column_labels``.
 	"""
 	arrays = {'times': results.times, 'frames': results.frames, 'body_labels': np.array(results.body_labels, dtype=str),
-	          'body_types': np.array(results.body_types, dtype=str)}
+	          'body_type_labels': np.array(results.body_type_labels, dtype=str)}
 	for prefix, item in (('', results), ('free_', free)):
 		if item is None:
 			continue
-		arrays[f'{prefix}bodies'] = item.bodies
-		arrays[f'{prefix}total'] = item.total
-		if item.atoms is not None:
-			arrays[f'{prefix}atoms'] = item.atoms
+		arrays[f'{prefix}body_sasa'] = item.body_sasa
+		arrays[f'{prefix}total_sasa'] = item.total_sasa
+		if item.atom_sasa is not None:
+			arrays[f'{prefix}atom_sasa'] = item.atom_sasa
 	if results.atom_labels is not None:
 		arrays['atom_labels'] = np.array(results.atom_labels, dtype=str)
 	if results.ag is not None:
@@ -331,10 +331,10 @@ def load(fname: str | Path, universe: mda.Universe | None = None) -> Saved:
 	atom_labels = data['atom_labels'].tolist() if 'atom_labels' in data else None
 
 	def results(prefix: str) -> Results:
-		return Results(data['times'], data['frames'], data[f'{prefix}bodies'], data['body_labels'].tolist(),
-		               data['body_types'].tolist(), data.get(f'{prefix}atoms'), atom_labels, ag)
+		return Results(data['times'], data['frames'], data[f'{prefix}body_sasa'], data['body_labels'].tolist(),
+		               data['body_type_labels'].tolist(), data.get(f'{prefix}atom_sasa'), atom_labels, ag)
 
 	main = results('')
-	free = results('free_') if 'free_bodies' in data else None
+	free = results('free_') if 'free_body_sasa' in data else None
 	return Saved(main, free, _difference(free, main) if free is not None else None,
 	             json.loads(str(data['meta'])) if 'meta' in data else {})

@@ -43,21 +43,21 @@ def test_equals_whole_selection(complex_):
     """
     ligand, protein = complex_.select_atoms('resid 1'), complex_.select_atoms('resid 2 3')
     covered = SASA(ligand, ndots=240, environment=protein)
-    per_atom = covered.run().atoms
+    per_atom = covered.run().atom_sasa
     whole = SASA(ligand | protein, ndots=240, bodies='selection')
     whole.run()
-    assert np.allclose(covered.results.total, whole.results.select(ligand), rtol=1e-9)
+    assert np.allclose(covered.results.total_sasa, whole.results.select(ligand), rtol=1e-9)
     assert np.allclose(per_atom, whole.results.select(ligand, per_atom=True), rtol=1e-9, atol=1e-12)
-    alone = SASA(ligand, ndots=240).run().bodies[0]
-    assert np.all(covered.results.total < 0.9 * alone) # buried by the environment
+    alone = SASA(ligand, ndots=240).run().body_sasa[0]
+    assert np.all(covered.results.total_sasa < 0.9 * alone) # buried by the environment
     # blocks of one frame: the same
-    one_by_one = SASA(ligand, ndots=240, environment=protein, max_frame_atoms=1).run().bodies
-    assert np.allclose(one_by_one, covered.results.bodies, rtol=1e-9)
+    one_by_one = SASA(ligand, ndots=240, environment=protein, max_frame_atoms=1).run().body_sasa
+    assert np.allclose(one_by_one, covered.results.body_sasa, rtol=1e-9)
     # a selection string and an AtomGroup give the same
-    assert np.array_equal(SASA(ligand, ndots=240, environment='resid 2 3').run().bodies, covered.results.bodies)
+    assert np.array_equal(SASA(ligand, ndots=240, environment='resid 2 3').run().body_sasa, covered.results.body_sasa)
     # far away: no effect
     far = copies(complex_.atoms[:36], [0.0, 100.0])
-    assert np.allclose(SASA(far.select_atoms('resid 1'), ndots=240, environment='resid 2').run().bodies[0], alone)
+    assert np.allclose(SASA(far.select_atoms('resid 1'), ndots=240, environment='resid 2').run().body_sasa[0], alone)
 
 
 def test_periodic_images(gsh_aa):
@@ -66,7 +66,7 @@ def test_periodic_images(gsh_aa):
     ligand or single environment atoms by box vectors does not change the SASA.
     """
     reference = copies(gsh_aa, [0.0, 4.0, -4.0], box=BOX)
-    expected = SASA(reference.select_atoms('resid 1'), ndots=240, environment='resid 2 3').run().bodies
+    expected = SASA(reference.select_atoms('resid 1'), ndots=240, environment='resid 2 3').run().body_sasa
     vectors = triclinic_vectors(BOX)
     moved = copies(gsh_aa, [0.0, 4.0, -4.0], box=BOX)
     coordinates = moved.trajectory.coordinate_array # (n_frames, n_atoms, 3), in memory
@@ -75,11 +75,11 @@ def test_periodic_images(gsh_aa):
     rng = np.random.default_rng(0)
     shifts = rng.integers(-1, 2, size=(len(environment), 3)) @ vectors # every environment atom on its own
     coordinates[:, environment] += shifts
-    result = SASA(moved.select_atoms('resid 1'), ndots=240, environment='resid 2 3').run().bodies
+    result = SASA(moved.select_atoms('resid 1'), ndots=240, environment='resid 2 3').run().body_sasa
     assert np.allclose(result, expected, rtol=1e-6)
     # without the box, the broken environment would bury less
     assert np.allclose(expected, SASA(copies(gsh_aa, [0.0, 4.0, -4.0]).select_atoms('resid 1'), ndots=240,
-                                      environment='resid 2 3').run().bodies, rtol=1e-6)
+                                      environment='resid 2 3').run().body_sasa, rtol=1e-6)
 
 
 def test_environment_copies():
@@ -107,11 +107,11 @@ def test_molecule_bodies(gsh_aa):
     covered = SASA(ligands, ndots=240, environment=protein)
     covered.run(stop=5)
     for k, resid in enumerate((1, 2)):
-        alone = SASA(u.select_atoms(f'resid {resid}'), ndots=240, environment=protein).run(stop=5).bodies[0]
-        assert np.allclose(covered.results.bodies[k], alone, rtol=1e-9)
+        alone = SASA(u.select_atoms(f'resid {resid}'), ndots=240, environment=protein).run(stop=5).body_sasa[0]
+        assert np.allclose(covered.results.body_sasa[k], alone, rtol=1e-9)
     together = SASA(ligands, ndots=240, environment=protein, bodies='selection')
     together.run(stop=5)
-    assert np.all(together.results.total < covered.results.total)
+    assert np.all(together.results.total_sasa < covered.results.total_sasa)
     assert 'covered by an environment of 36 atom(s)' in covered.describe()
 
 
@@ -122,15 +122,15 @@ def test_buried(complex_):
     sasa.run(stop=6)
     free = SASA(ligand, ndots=240)
     free.run(stop=6)
-    assert np.allclose(sasa.free.bodies, free.results.bodies, rtol=1e-9)
-    assert np.allclose(sasa.free.atoms, free.results.atoms, rtol=1e-9)
-    buried = sasa.buried.total
-    assert np.allclose(buried, free.results.total - sasa.results.total)
+    assert np.allclose(sasa.free.body_sasa, free.results.body_sasa, rtol=1e-9)
+    assert np.allclose(sasa.free.atom_sasa, free.results.atom_sasa, rtol=1e-9)
+    buried = sasa.buried.total_sasa
+    assert np.allclose(buried, free.results.total_sasa - sasa.results.total_sasa)
     assert np.all(buried > 0)
-    assert np.all(sasa.buried.atoms >= -1e-12) # an atom is never more exposed with it
+    assert np.all(sasa.buried.atom_sasa >= -1e-12) # an atom is never more exposed with it
     assert np.allclose(sasa.buried.select('name S*'), free.results.select('name S*') - sasa.results.select('name S*'))
     assert np.allclose(sasa.buried.body('GSH1'), buried)
-    assert sasa.buried.bodies.shape == (1, 6)
+    assert sasa.buried.body_sasa.shape == (1, 6)
     # without buried: no free SASA
     plain = SASA(ligand, ndots=240, environment='resid 2 3')
     plain.run(stop=2)
@@ -161,7 +161,7 @@ def test_surface_with_environment(complex_, tmp_path):
     sasa.run()
     out = tmp_path / 'ligand.pdb'
     surface = sasa.write_surface(out, frame=3, return_surface=True)
-    assert surface.area == pytest.approx(sasa.results.bodies[0, 3], rel=1e-6)
+    assert surface.area == pytest.approx(sasa.results.body_sasa[0, 3], rel=1e-6)
     assert np.all(surface.owners < ligand.n_atoms)
     assert 0 < surface.environment.n_atoms <= 72
     assert any('Covered by an environment of 72 atoms' in remark for remark in surface.remarks)
@@ -198,8 +198,8 @@ def test_cli_environment(complex_, tmp_path, capsys):
     u = mda.Universe(pdb)
     sasa = SASA(u.select_atoms('resid 1'), ndots=240, environment='resid 2 3', buried=True)
     sasa.run()
-    assert data[1] == pytest.approx(sasa.results.total[0], abs=1e-4)
-    assert data[3] == pytest.approx(sasa.buried.total[0], abs=1e-4)
+    assert data[1] == pytest.approx(sasa.results.total_sasa[0], abs=1e-4)
+    assert data[3] == pytest.approx(sasa.buried.total_sasa[0], abs=1e-4)
 
     # groups and npz; plots and surfaces with the environment
     out = tmp_path / 'ligand.npz'
@@ -210,7 +210,7 @@ def test_cli_environment(complex_, tmp_path, capsys):
     result = np.load(out)
     assert result['column_labels'].tolist() == ['name S*', 'name S* buried']
     saved = load(out)
-    assert np.allclose(saved.buried.total, sasa.buried.total, atol=1e-12)
+    assert np.allclose(saved.buried.total_sasa, sasa.buried.total_sasa, atol=1e-12)
     assert saved.meta['environment'] == 'resid 2 3' and saved.meta['n_environment'] == 72
     assert 'ATOM' in (tmp_path / 'surf' / 'GSH_sasa.pdb').read_text()
     assert (tmp_path / 'plots' / 'sasa_total.png').is_file()

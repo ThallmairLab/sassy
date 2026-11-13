@@ -16,14 +16,14 @@ def read_xvg(path):
 
 
 def test_cli_molecules(tmp_path):
-    """The xvg has the time and one column per molecule, equal to SASA.run().bodies."""
+    """The xvg has the time and one column per molecule, equal to SASA.run().body_sasa."""
     out = tmp_path / 'sasa.xvg'
     assert main(['-s', TPR, '-f', XTC, '-select', 'moltype GSH', '-ndots', '240',
                  '-skip', '25', '-columns', 'bodies', 'total', '-q', '-o', str(out)]) == 0
     data, legends = read_xvg(out)
     universe = mda.Universe(TPR, XTC)
     sasa = SASA(universe.select_atoms('moltype GSH'), ndots=240)
-    expected = sasa.run(step=25).bodies
+    expected = sasa.run(step=25).body_sasa
     assert legends == ['GSH1', 'total']
     assert np.allclose(data[:, 0], sasa.results.times, atol=1e-3)
     assert np.allclose(data[:, 1], expected[0], atol=1e-4)
@@ -44,7 +44,7 @@ def test_cli_groups_atoms_npz(tmp_path):
     assert result['frames'].tolist() == [0, 1, 2]
     assert np.allclose(result['columns'], [sasa.results.select('name S*'), sasa.results.select('name C*')])
     saved = load(out, universe)
-    assert np.allclose(saved.results.bodies, sasa.results.bodies) and saved.results.body_labels == ['GSH1']
+    assert np.allclose(saved.results.body_sasa, sasa.results.body_sasa) and saved.results.body_labels == ['GSH1']
     assert np.allclose(saved.results.select('name S*'), sasa.results.select('name S*'))
     assert saved.meta['selection'] == 'moltype GSH' and saved.meta['bodies'] == 'molecule'
     assert saved.meta['command'].startswith('sassy -s')
@@ -55,7 +55,7 @@ def test_cli_groups_atoms_npz(tmp_path):
                  'types', 'bodies', 'total', '-group', 'name S*', '-q', '-o', str(out)]) == 0
     data, legends = read_xvg(out)
     assert legends == ['total', 'GSH', 'GSH1', 'name S*']
-    assert np.allclose(data[:, 1:4].T, [sasa.results.total] * 3, atol=1e-4)
+    assert np.allclose(data[:, 1:4].T, [sasa.results.total_sasa] * 3, atol=1e-4)
 
     out = tmp_path / 'atoms.xvg'
     assert main(['-s', TPR, '-f', XTC, '-select', 'moltype GSH', '-ndots', '240', '-e', '2',
@@ -192,7 +192,7 @@ def test_cli_output_formats(tmp_path, capsys):
     run = ['-s', TPR, '-f', XTC, '-e', '2', '-ndots', '240', '-q']
     out = tmp_path / 'new' / 'x.NPZ'
     assert main(run + ['-o', str(out)]) == 0
-    assert np.load(out)['columns'].shape == (1, 2) and np.load(out)['bodies'].shape == (1, 2)
+    assert np.load(out)['columns'].shape == (1, 2) and np.load(out)['body_sasa'].shape == (1, 2)
     out = tmp_path / 'x.dat'
     assert main(run + ['-o', str(out)]) == 0
     assert 'unknown extension' in capsys.readouterr().err

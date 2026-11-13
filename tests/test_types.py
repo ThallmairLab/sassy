@@ -56,20 +56,20 @@ def test_molecule_types(gsh_aa):
 def test_sasa_types(gsh_aa):
     sasa = SASA(mixed(gsh_aa).atoms, ndots=240)
     assert sasa.body_labels == ['GSH1', 'GSX1', 'GSH2']
-    assert {name: list(indices) for name, indices in sasa.types.items()} == {'GSH': [0, 2], 'GSX': [1]}
+    assert {name: list(indices) for name, indices in sasa.body_type_indices.items()} == {'GSH': [0, 2], 'GSX': [1]}
     sasa.run(stop=3)
     assert np.array_equal(sasa.results.body('GSH2'), sasa.results.body(2))
-    assert np.array_equal(sasa.results.by_type(per_body=True)['GSH'], sasa.results.bodies[[0, 2]])
-    assert np.allclose(sasa.results.by_type()['GSH'] + sasa.results.by_type()['GSX'],
-                       sasa.results.total)
+    assert np.array_equal(sasa.results.type_sasa(per_body=True)['GSH'], sasa.results.body_sasa[[0, 2]])
+    assert np.allclose(sasa.results.type_sasa()['GSH'] + sasa.results.type_sasa()['GSX'],
+                       sasa.results.total_sasa)
     assert sasa.body_atoms('GSX1') == sasa.body_atoms(1)
     with pytest.raises(KeyError, match='GSH3'):
         sasa.results.body('GSH3')
     with pytest.raises(KeyError, match='No body type'):
         sasa.representative('SOL')
-    assert list(sasa.results.by_type()) == ['GSH', 'GSX'] and sasa.results.types.keys() == sasa.types.keys()
+    assert list(sasa.results.type_sasa()) == ['GSH', 'GSX'] and sasa.results.body_type_indices.keys() == sasa.body_type_indices.keys()
     whole = SASA(mixed(gsh_aa).atoms, ndots=240, bodies='selection')
-    assert whole.body_labels == ['selection'] and list(whole.types) == ['selection']
+    assert whole.body_labels == ['selection'] and list(whole.body_type_indices) == ['selection']
 
 
 def test_plots_by_type(tmp_path, monkeypatch):
@@ -153,19 +153,19 @@ def test_surface_per_type(gsh_aa, tmp_path):
     sasa = SASA(u.atoms, ndots=240, radii=radii)
     sasa.run(step=2)
     for name in ('GSH', 'GSX'):
-        values = sasa.results.by_type(per_body=True)[name]
+        values = sasa.results.type_sasa(per_body=True)[name]
         for statistic in ('median', 'mean', 'q3'):
             molecule, frame, target = sasa.representative(name, statistic)
             from sassy.surface import STATISTICS
             assert target == pytest.approx(STATISTICS[statistic](values.ravel()))
             column = np.flatnonzero(sasa.results.frames == frame)[0]
-            assert molecule in sasa.types[name]
-            assert abs(sasa.results.bodies[molecule, column] - target) == pytest.approx(np.abs(values - target).min())
+            assert molecule in sasa.body_type_indices[name]
+            assert abs(sasa.results.body_sasa[molecule, column] - target) == pytest.approx(np.abs(values - target).min())
     assert sasa.representative('GSH')[2] != pytest.approx(sasa.representative('GSX')[2]) # own medians
     # a fixed frame: only the molecule is chosen
     frame = int(sasa.results.frames[3])
     molecule, chosen, target = sasa.representative('GSH', frame=frame)
-    assert chosen == frame and molecule == [0, 2][np.argmin(np.abs(sasa.results.bodies[[0, 2], 3] - target))]
+    assert chosen == frame and molecule == [0, 2][np.argmin(np.abs(sasa.results.body_sasa[[0, 2], 3] - target))]
     assert sasa.representative('GSH', frame=1)[:2] == (0, 1) # not analysed: the first molecule
     # write_surface by type
     surface = sasa.write_surface(tmp_path / 'GSX_sasa.pdb', body_type='GSX', return_surface=True)
@@ -173,7 +173,7 @@ def test_surface_per_type(gsh_aa, tmp_path):
     assert any(r.startswith('Representative molecule and frame: GSX1 in frame') and
                '1 GSX molecule(s) x' in r for r in surface.remarks)
     # one molecule: its frame closest to the statistic of its type
-    target = np.median(sasa.results.by_type(per_body=True)['GSH'])
+    target = np.median(sasa.results.type_sasa(per_body=True)['GSH'])
     surface = sasa.write_surface(tmp_path / 'x.pdb', body='GSH2', return_surface=True)
     assert surface.frame == sasa.results.frames[np.argmin(np.abs(sasa.results.body(2) - target))]
     with pytest.raises(KeyError):
@@ -209,8 +209,8 @@ def test_residue_bodies(gsh_aa, tmp_path):
     from sassy import residue_labels, residue_types
     from test_environment import copies
     single = SASA(gsh_aa, ndots=240, bodies='residue')
-    assert single.body_labels == ['GSH1'] and single.body_types == ['GSH']
-    assert np.allclose(single.run(stop=4).bodies, SASA(gsh_aa, ndots=240).run(stop=4).bodies, rtol=1e-12)
+    assert single.body_labels == ['GSH1'] and single.body_type_labels == ['GSH']
+    assert np.allclose(single.run(stop=4).body_sasa, SASA(gsh_aa, ndots=240).run(stop=4).body_sasa, rtol=1e-12)
 
     u = copies(gsh_aa, [0.0, 4.0, -4.0]) # three overlapping residues ...
     u.residues.molnums = [0, 0, 0] # ... of one molecule
@@ -218,12 +218,12 @@ def test_residue_bodies(gsh_aa, tmp_path):
     assert molecule.n_bodies == 1
     molecule.run(stop=4)
     residues = SASA(u.atoms, ndots=240, bodies='residue')
-    assert residues.body_labels == ['GSH1', 'GSH2', 'GSH3'] and list(residues.types) == ['GSH']
+    assert residues.body_labels == ['GSH1', 'GSH2', 'GSH3'] and list(residues.body_type_indices) == ['GSH']
     residues.run(stop=4)
-    alone = SASA(gsh_aa, ndots=240).run(stop=4).bodies[0]
-    assert np.allclose(residues.results.bodies, alone, rtol=1e-6) # each residue on its own
+    alone = SASA(gsh_aa, ndots=240).run(stop=4).body_sasa[0]
+    assert np.allclose(residues.results.body_sasa, alone, rtol=1e-6) # each residue on its own
     for k in range(3): # in the molecule, a residue is buried by the others
-        assert np.all(molecule.results.select(f'resid {k + 1}') < residues.results.bodies[k])
+        assert np.all(molecule.results.select(f'resid {k + 1}') < residues.results.body_sasa[k])
     assert 'Residue 1 of 3 (GSH, resid 2, 36 atoms), on its own' in \
         residues.write_surface(tmp_path / 'x.pdb', body='GSH2', return_surface=True).remarks
 

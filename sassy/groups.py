@@ -216,7 +216,7 @@ def members(index: np.ndarray, n: int | None = None) -> list[np.ndarray]:
 	order = np.argsort(index, kind='stable')
 	return np.split(order, np.cumsum(np.bincount(index, minlength=n))[:-1]) if n else []
 
-def type_members(types: list[str]) -> dict[str, np.ndarray]:
+def body_type_indices(types: list[str]) -> dict[str, np.ndarray]:
 	'''
 	Indices of every type: {type: indices of its entries in ``types``}, types in the order of
 	first appearance, e.g. ['GSH', 'SOL', 'GSH'] -> {'GSH': array([0, 2]), 'SOL': array([1])}.

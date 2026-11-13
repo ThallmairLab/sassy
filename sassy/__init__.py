@@ -17,10 +17,10 @@ atomistic systems, a bead in coarse-grained ones.
 >>> from sassy import SASA
 >>> u = mda.Universe('topol.tpr', 'traj.xtc')
 >>> res = SASA(u.select_atoms('moltype GSH')).run()   # Results
->>> res.bodies, res.body_labels, res.total                    # (n_bodies, n_frames) nm^2, ['GSH1', ...], (n_frames,)
+>>> res.body_sasa, res.body_labels, res.total_sasa                   # (n_bodies, n_frames) nm^2, ['GSH1', ...], (n_frames,)
 >>> ligand = SASA(u.select_atoms('resname LIG'), environment='protein', buried=True)
->>> ligand.run().total, ligand.buried.total             # uncovered by the protein, buried by it
->>> ligand.save('ligand.npz'); load('ligand.npz').buried.total
+>>> ligand.run().total_sasa, ligand.buried.total_sasa            # uncovered by the protein, buried by it
+>>> ligand.save('ligand.npz'); load('ligand.npz').buried.total_sasa
 """
 from .dots import unit_dots, ico_dot_arc, ico_dot_dod
 from .engine import surface_dots, warn_coincident

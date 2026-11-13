@@ -10,7 +10,7 @@ def test_sasa_class(gsh_aa):
     The SASA of every frame equals the area of the surface dots of that frame,
     independent of how many frames are processed at once.
     """
-    sasa = SASA(gsh_aa, ndots=240).run().bodies
+    sasa = SASA(gsh_aa, ndots=240).run().body_sasa
     assert sasa.shape == (1, gsh_aa.universe.trajectory.n_frames)
     radii = atom_radii(gsh_aa)
     for frame in (0, 7, 19):
@@ -18,9 +18,9 @@ def test_sasa_class(gsh_aa):
         _, _, area = surface_dots(to_nm(gsh_aa.positions), radii, ndots=240)
         assert sasa[0, frame] == pytest.approx(area, rel=1e-6)
     # one frame per block
-    one_by_one = SASA(gsh_aa, ndots=240, max_frame_atoms=1).run().bodies
+    one_by_one = SASA(gsh_aa, ndots=240, max_frame_atoms=1).run().body_sasa
     assert np.allclose(one_by_one, sasa, rtol=1e-6)
-    assert np.allclose(SASA(gsh_aa, ndots=240).run(start=5, step=3).bodies, sasa[:, 5::3], rtol=1e-6)
+    assert np.allclose(SASA(gsh_aa, ndots=240).run(start=5, step=3).body_sasa, sasa[:, 5::3], rtol=1e-6)
 
 
 def test_sasa_per_atom(gsh_aa):
@@ -32,17 +32,17 @@ def test_sasa_per_atom(gsh_aa):
     radii = atom_radii(gsh_aa)
     radii[3] = 0
     sasa = SASA(gsh_aa, radii=radii, ndots=240)
-    per_atom = sasa.run().atoms
+    per_atom = sasa.run().atom_sasa
     n_frames = gsh_aa.universe.trajectory.n_frames
     assert per_atom.shape == (gsh_aa.n_atoms, n_frames)
     assert np.all(per_atom[3] == 0)
-    assert np.allclose(per_atom.sum(axis=0), sasa.run().bodies[0], rtol=1e-10)
+    assert np.allclose(per_atom.sum(axis=0), sasa.run().body_sasa[0], rtol=1e-10)
     gsh_aa.universe.trajectory[7]
     _, owners, _ = surface_dots(to_nm(gsh_aa.positions), radii, ndots=240)
     ext = radii + 0.191
     expected = np.bincount(owners, minlength=gsh_aa.n_atoms) * 4 * np.pi * ext**2 / len(sasa.unit)
     assert np.allclose(per_atom[:, 7], expected, rtol=1e-6)
-    one_by_one = SASA(gsh_aa, radii=radii, ndots=240, max_frame_atoms=1).run(start=2, step=3).atoms
+    one_by_one = SASA(gsh_aa, radii=radii, ndots=240, max_frame_atoms=1).run(start=2, step=3).atom_sasa
     assert np.allclose(one_by_one, per_atom[:, 2::3], rtol=1e-6)
 
 
@@ -51,12 +51,12 @@ def test_sasa_progress(gsh_aa, capsys):
     The progress bar goes to stderr, counts all frames, and does not change the result.
     """
     sasa = SASA(gsh_aa, ndots=240, max_frame_atoms=200)
-    quiet = sasa.run(step=2).bodies
+    quiet = sasa.run(step=2).body_sasa
     assert capsys.readouterr().err == ''
-    assert np.array_equal(sasa.run(step=2, verbose=True).bodies, quiet)
+    assert np.array_equal(sasa.run(step=2, verbose=True).body_sasa, quiet)
     n_frames = len(gsh_aa.universe.trajectory[::2])
     assert f'{n_frames}/{n_frames}' in capsys.readouterr().err
-    assert np.allclose(sasa.run(step=2, verbose=True).atoms.sum(axis=0), quiet[0], rtol=1e-10)
+    assert np.allclose(sasa.run(step=2, verbose=True).atom_sasa.sum(axis=0), quiet[0], rtol=1e-10)
 
 
 def test_sasa_getters(gsh_aa):
@@ -73,14 +73,14 @@ def test_sasa_getters(gsh_aa):
     assert sasa.results is None # before run()
     with pytest.raises(RuntimeError, match='run'):
         sasa.save('never.npz') # nothing to save, nothing written
-    molecules = sasa.run(step=4).bodies
+    molecules = sasa.run(step=4).body_sasa
     n_frames = len(two.trajectory[::4])
-    assert sasa.results.atoms.shape == (two.atoms.n_atoms, n_frames)
+    assert sasa.results.atom_sasa.shape == (two.atoms.n_atoms, n_frames)
     assert sasa.results.frames.tolist() == list(range(0, two.trajectory.n_frames, 4))
     assert np.allclose(sasa.results.times, [ts.time for ts in two.trajectory[::4]])
 
     # molecules by index
-    assert np.array_equal(sasa.results.bodies, molecules)
+    assert np.array_equal(sasa.results.body_sasa, molecules)
     assert np.array_equal(sasa.results.body(1), molecules[1])
     assert np.array_equal(sasa.results.body(-1), molecules[1])
     assert np.array_equal(sasa.results.body([1, 0]), molecules[[1, 0]])
@@ -89,15 +89,15 @@ def test_sasa_getters(gsh_aa):
 
     # selections: all atoms, a molecule, a string, a residue, a single atom
     n = gsh_aa.n_atoms
-    assert np.allclose(sasa.results.total, molecules.sum(axis=0))
+    assert np.allclose(sasa.results.total_sasa, molecules.sum(axis=0))
     assert np.allclose(sasa.results.select(two.atoms[n:]), molecules[1])
     sulfur = sasa.results.select('name S*', per_atom=True)
     assert sulfur.shape == (len(two.select_atoms('name S*')), n_frames)
     assert np.allclose(sasa.results.select('name S*'), sulfur.sum(axis=0))
     assert np.allclose(sasa.results.select(two.residues[0]), molecules[0])
-    assert np.array_equal(sasa.results.select(two.atoms[5], per_atom=True), sasa.results.atoms[[5]])
+    assert np.array_equal(sasa.results.select(two.atoms[5], per_atom=True), sasa.results.atom_sasa[[5]])
     # order of the selection is kept
-    assert np.array_equal(sasa.results.select(two.atoms[[7, 2]], per_atom=True), sasa.results.atoms[[7, 2]])
+    assert np.array_equal(sasa.results.select(two.atoms[[7, 2]], per_atom=True), sasa.results.atom_sasa[[7, 2]])
 
     # selections outside the AtomGroup are rejected
     part = SASA(two.atoms[:n], ndots=240)
@@ -114,9 +114,9 @@ def test_sasa_zero_radius(gsh_aa):
     """
     radii = atom_radii(gsh_aa)
     radii[3] = 0
-    without = SASA(gsh_aa, radii=radii, ndots=240).run().bodies
+    without = SASA(gsh_aa, radii=radii, ndots=240).run().body_sasa
     removed = gsh_aa[np.arange(gsh_aa.n_atoms) != 3]
-    assert np.allclose(without, SASA(removed, ndots=240).run().bodies, rtol=1e-6)
+    assert np.allclose(without, SASA(removed, ndots=240).run().body_sasa, rtol=1e-6)
 
 
 def test_unknown_element(gsh_aa):
@@ -144,8 +144,8 @@ def test_radii_dict(gsh_aa):
     expected[carbon] = 0.170
     expected[0] = 0.227
     assert np.allclose(radii, expected)
-    by_dict = SASA(atoms, radii={'Na': 0.227, 'C': 0.170}, ndots=240).run().bodies
-    assert np.allclose(by_dict, SASA(atoms, radii=radii, ndots=240).run().bodies, rtol=1e-6)
+    by_dict = SASA(atoms, radii={'Na': 0.227, 'C': 0.170}, ndots=240).run().body_sasa
+    assert np.allclose(by_dict, SASA(atoms, radii=radii, ndots=240).run().body_sasa, rtol=1e-6)
     with pytest.raises(ValueError, match='>= 0'):
         atom_radii(atoms, table={'Na': -0.1})
     with pytest.raises(ValueError, match='one value per atom'):
@@ -193,8 +193,8 @@ def test_sasa_per_copy(gsh_aa):
     assert [len(copy) for copy in copies] == [gsh_aa.n_atoms] * 2
     assert np.all(copies[0].indices == np.arange(gsh_aa.n_atoms))
 
-    single = SASA(gsh_aa).run().bodies[0]
-    per_copy = SASA(two.atoms).run().bodies
+    single = SASA(gsh_aa).run().body_sasa[0]
+    per_copy = SASA(two.atoms).run().body_sasa
     assert per_copy.shape == (2, n_frames)
     # translation does not change the SASA (up to float32 rounding); burial by the
     # overlapping copy would change it by several nm^2
@@ -268,9 +268,9 @@ def test_sasa_copies_without_molnums(gsh_aa):
     if hasattr(two.atoms, 'molnums'):
         two.del_TopologyAttr('molnums')
     assert [len(SASA(two.atoms).body_atoms(i)) for i in range(2)] == [gsh_aa.n_atoms] * 2
-    with_molnums = SASA(two.atoms, ndots=240).run().bodies
+    with_molnums = SASA(two.atoms, ndots=240).run().body_sasa
     two.add_TopologyAttr('molnums', [0, 1])
-    assert np.allclose(with_molnums, SASA(two.atoms, ndots=240).run().bodies)
+    assert np.allclose(with_molnums, SASA(two.atoms, ndots=240).run().body_sasa)
 
 
 def test_cg_radii():
@@ -289,7 +289,7 @@ def test_cg_radii():
     assert radii.tolist() == [CG_RADII[s] for s in 'TSRRU']
     # beads far apart: every bead keeps its full sphere, the dummy has none
     universe.atoms.positions = np.arange(5)[:, None] * np.array([[20.0, 0.0, 0.0]])
-    per_atom = SASA(universe.atoms, cg=True, ndots=240).run().atoms
+    per_atom = SASA(universe.atoms, cg=True, ndots=240).run().atom_sasa
     expected = [4 * np.pi * (r + 0.191)**2 if r else 0.0 for r in radii]
     assert np.allclose(per_atom[:, 0], expected)
 
@@ -300,13 +300,13 @@ def test_keep_atoms(gsh_aa, tmp_path):
     and what needs it raises.
     """
     full = SASA(gsh_aa, ndots=240)
-    molecules = full.run(step=4).bodies
-    assert np.array_equal(full.results.bodies, molecules)
-    assert np.allclose(full.results.total, full.results.atoms.sum(axis=0))
+    molecules = full.run(step=4).body_sasa
+    assert np.array_equal(full.results.body_sasa, molecules)
+    assert np.allclose(full.results.total_sasa, full.results.atom_sasa.sum(axis=0))
     light = SASA(gsh_aa, ndots=240, keep_atoms=False)
-    assert np.array_equal(light.run(step=4).bodies, molecules)
-    assert light.results.atoms is None and light.results.atom_labels is None
-    assert np.array_equal(light.results.total, full.results.total)
+    assert np.array_equal(light.run(step=4).body_sasa, molecules)
+    assert light.results.atom_sasa is None and light.results.atom_labels is None
+    assert np.array_equal(light.results.total_sasa, full.results.total_sasa)
     assert np.array_equal(light.results.body(0), molecules[0])
     assert (light.write_surface(tmp_path / 'a.pdb', return_surface=True).frame
             == full.write_surface(tmp_path / 'b.pdb', return_surface=True).frame)

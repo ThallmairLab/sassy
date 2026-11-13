@@ -14,7 +14,7 @@ from MDAnalysis.lib.log import ProgressBar
 from .dots import unit_dots
 from .engine import _exposed_counts, warn_coincident
 from .environment import box_nm, environment_copies
-from .groups import BODIES, Bodies, atom_label, members, partition, type_members
+from .groups import BODIES, Bodies, atom_label, members, partition, body_type_indices
 from .radii import PROBE_RADIUS, atom_radii
 from .results import Results, _difference, body_index, save
 from .units import to_nm
@@ -76,7 +76,7 @@ class SASA:
 		also compute the SASA without the environment (:attr:`free`), and so the area the
 		environment buries (:attr:`buried`); needs an ``environment``
 	keep_atoms : bool
-		keep the SASA of every atom of every frame (``results.atoms``, (n_atoms, n_frames)),
+		keep the SASA of every atom of every frame (``results.atom_sasa``, (n_atoms, n_frames)),
 		needed for :meth:`Results.select`. The SASA of every body is always kept; False
 		saves the memory of the per-atom array for very large systems or long trajectories
 
@@ -84,13 +84,13 @@ class SASA:
 	--------
 	>>> sasa = SASA(universe.select_atoms('moltype GSH'))
 	>>> res = sasa.run()          # Results, also sasa.results
-	>>> res.bodies, res.body_labels    # (n_bodies, n_frames) nm^2, ['GSH1', 'GSH2', ...]
-	>>> res.total                 # (n_frames,)
+	>>> res.body_sasa, res.body_labels # (n_bodies, n_frames) nm^2, ['GSH1', 'GSH2', ...]
+	>>> res.total_sasa            # (n_frames,)
 	>>> res.select('name S*')     # (n_frames,) SASA of the sulfur atoms
 	>>> sasa.write_surface('dots.pdb', body='GSH1')  # structure + surface dots of a median-SASA frame
 	>>> ligand = SASA(universe.select_atoms('resname LIG'), environment='protein', buried=True)
-	>>> ligand.run().total        # SASA of the ligand left uncovered by the protein
-	>>> ligand.buried.total       # area of the ligand buried by the protein
+	>>> ligand.run().total_sasa   # SASA of the ligand left uncovered by the protein
+	>>> ligand.buried.total_sasa  # area of the ligand buried by the protein
 	>>> ligand.save('ligand.npz') # all of it, see load()
 
 	Attributes
@@ -103,11 +103,11 @@ class SASA:
 		(n_bodies,) label of every body: its type numbered within the type (GSH1, GSH2,
 		SOL1, ...); ``<resname><resid>`` (ALA12) with ``bodies='residue'``; 'selection'
 		with ``bodies='selection'``
-	body_types : list of str
+	body_type_labels : list of str
 		(n_bodies,) type of every body: its moltype (tpr), else named by its first residue
 		(see :func:`molecule_types`); the residue type (see :func:`residue_types`) with
 		``bodies='residue'``; 'selection' with ``bodies='selection'``
-	types : dict of str to np.ndarray
+	body_type_indices : dict of str to np.ndarray
 		body indices of every type, in the order of first appearance
 	results : Results or None
 		of the last :meth:`run`: the SASA (with an environment: the part it leaves uncovered)
@@ -149,7 +149,7 @@ class SASA:
 		# prepare atoms/bodies
 		self.ag = ag
 		self.radii = radii # (n_atoms,) van der Waals radii (nm)
-		body_of_atom, self.body_types, self.body_labels = partition(ag, bodies)
+		body_of_atom, self.body_type_labels, self.body_labels = partition(ag, bodies)
 		self.n_bodies = int(body_of_atom.max()) + 1 if len(body_of_atom) else 0
 		self._body_of_atom = body_of_atom # (n_atoms,) body of every atom
 		self._members = members(body_of_atom, self.n_bodies) # indices in ag of the atoms of every body
@@ -188,9 +188,9 @@ class SASA:
 		             probe, self._frames_per_block)
 
 	@property
-	def types(self) -> dict[str, np.ndarray]:
+	def body_type_indices(self) -> dict[str, np.ndarray]:
 		"""Body indices of every type, in the order of first appearance: {type: indices}."""
-		return type_members(self.body_types)
+		return body_type_indices(self.body_type_labels)
 
 	def describe(self) -> str:
 		"""The bodies in words, e.g. '3 molecule(s)', '12 residue(s)' or 'the whole selection as one body'."""
@@ -395,7 +395,7 @@ class SASA:
 		atom_labels = [atom_label(atom) for atom in self.ag] if self.keep_atoms else None
 
 		def results(atoms: np.ndarray | None, bodies: np.ndarray) -> Results:
-			return Results(times, frames, bodies, self.body_labels, self.body_types, atoms, atom_labels, self.ag)
+			return Results(times, frames, bodies, self.body_labels, self.body_type_labels, atoms, atom_labels, self.ag)
 
 		self.results = results(*covered)
 		self.free = results(*free) if free is not None else None
@@ -490,11 +490,11 @@ class SASA:
 			the statistic (nm^2) of the type's distribution
 		"""
 		results = self._check_run()
-		if body_type not in self.types:
-			raise KeyError(f"No body type {body_type!r}; types: {', '.join(self.types)}.")
+		if body_type not in self.body_type_indices:
+			raise KeyError(f"No body type {body_type!r}; types: {', '.join(self.body_type_indices)}.")
 		function, _ = _statistic(statistic)
-		bodies = self.types[body_type]
-		values = results.bodies[bodies] # (n_bodies_of_type, n_frames)
+		bodies = self.body_type_indices[body_type]
+		values = results.body_sasa[bodies] # (n_bodies_of_type, n_frames)
 		target = float(function(values.ravel()))
 		if frame is None:
 			k, column = np.unravel_index(np.argmin(np.abs(values - target)), values.shape)
@@ -569,10 +569,10 @@ class SASA:
 		function, name = _statistic(statistic) # checked also when not used
 		chosen = None # remark on how the frame was chosen
 		if body_type is not None:
-			if body_type not in self.types:
-				raise KeyError(f"No body type {body_type!r}; types: {', '.join(self.types)}.")
+			if body_type not in self.body_type_indices:
+				raise KeyError(f"No body type {body_type!r}; types: {', '.join(self.body_type_indices)}.")
 			if reference is not None:
-				body = int(self.types[body_type][0])
+				body = int(self.body_type_indices[body_type][0])
 			else:
 				body, frame, target = self.representative(body_type, function, frame)
 				chosen = self._chosen_remark(body, frame, target, name, body_choice=True)
@@ -580,8 +580,8 @@ class SASA:
 			body = self.body_index(body)
 			if frame is None and reference is None:
 				results = self._check_run()
-				target = float(function(results.by_type(per_body=True)[self.body_types[body]].ravel()))
-				frame = int(results.frames[np.argmin(np.abs(results.bodies[body] - target))])
+				target = float(function(results.type_sasa(per_body=True)[self.body_type_labels[body]].ravel()))
+				frame = int(results.frames[np.argmin(np.abs(results.body_sasa[body] - target))])
 				chosen = self._chosen_remark(body, frame, target, name)
 		atoms = self.body_atoms(body) # bodies='selection': all of ag
 		indices = self._lookup[atoms.indices]
@@ -603,10 +603,10 @@ class SASA:
 	def _chosen_remark(self, body: int, frame: int, target: float, name: str, body_choice: bool = False) -> str:
 		"""REMARK on how the frame (and body) of a surface was chosen; also logged."""
 		results = self.results
-		body_type = self.body_types[body]
-		n_bodies = len(self.types[body_type])
+		body_type = self.body_type_labels[body]
+		n_bodies = len(self.body_type_indices[body_type])
 		analysed = np.flatnonzero(results.frames == frame)
-		sasa = f"{results.bodies[body, analysed[0]]:.3f} nm^2" if len(analysed) else "not analysed"
+		sasa = f"{results.body_sasa[body, analysed[0]]:.3f} nm^2" if len(analysed) else "not analysed"
 		pool = (f"{results.n_frames} analysed frame(s)" if self.bodies == 'selection' else
 		        f"{n_bodies} {body_type} {self.bodies}(s) x {results.n_frames} analysed frame(s)")
 		what = (f"Representative {self.bodies} and frame: {self.body_labels[body]} in frame {frame}"
