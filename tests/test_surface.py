@@ -63,7 +63,7 @@ def test_surface_function(gsh_aa, tmp_path):
     assert 'Custom radii' in custom.remarks
     assert custom.area == pytest.approx(generate_surface(gsh_aa, radii=sasa.radii, frame=5).area)
     assert custom.area != pytest.approx(result.area)
-    assert np.array_equal(sasa.molecule_atoms(0).indices, gsh_aa.indices)
+    assert np.array_equal(sasa.body_atoms(0).indices, gsh_aa.indices)
 
 
 def test_surface_area_and_frame(gsh_aa, tmp_path):
@@ -74,15 +74,15 @@ def test_surface_area_and_frame(gsh_aa, tmp_path):
     sasa = SASA(gsh_aa, ndots=240)
     with pytest.raises(RuntimeError, match='run'):
         sasa.write_surface(tmp_path / 'x.pdb')
-    series = sasa.run(step=2)[0]
+    series = sasa.run(step=2).bodies[0]
     surface = sasa.write_surface(tmp_path / 'x.pdb', return_surface=True)
-    assert surface.frame == sasa.frames[closest_to(series)]
+    assert surface.frame == sasa.results.frames[closest_to(series)]
     assert surface.area == pytest.approx(series[closest_to(series)], rel=1e-6)
     assert any(r.startswith('Representative frame: SASA (') and 'closest to the median' in r for r in surface.remarks)
     # other statistics: names, functions and fixed values
     for statistic in ('mean', 'mode', 'q1', 'q3', 'max', 'mean-std', np.min, lambda v: np.percentile(v, 75), 6.3):
         chosen = sasa.write_surface(tmp_path / 'x.pdb', statistic=statistic, return_surface=True)
-        assert chosen.frame == sasa.frames[closest_to(series, statistic)]
+        assert chosen.frame == sasa.results.frames[closest_to(series, statistic)]
     assert 'max (' in sasa.write_surface(tmp_path / 'x.pdb', statistic='max', return_surface=True).remarks[3]
     custom = sasa.write_surface(tmp_path / 'x.pdb', statistic=lambda v: v.max(), return_surface=True)
     assert 'custom statistic' in custom.remarks[3]
@@ -115,7 +115,7 @@ def test_surface_reference(gsh_aa, tmp_path):
     assert surface.frame == 7 and surface.rmsd == pytest.approx(0, abs=1e-5)
     assert np.allclose(surface.positions, reference, atol=1e-4)
     sasa.run(step=2) # then only the frames of the run: 7 is not among them
-    assert sasa.write_surface(tmp_path / 'x.pdb', reference=reference, return_surface=True).frame in sasa.frames
+    assert sasa.write_surface(tmp_path / 'x.pdb', reference=reference, return_surface=True).frame in sasa.results.frames
     with pytest.raises(ValueError, match='not both'):
         sasa.write_surface(tmp_path / 'x.pdb', frame=0, reference=reference)
     with pytest.raises(ValueError, match='reference structure has'):
@@ -133,12 +133,12 @@ def test_surface_molecules(gsh_aa, tmp_path):
     alone = SASA(gsh_aa, ndots=240).write_surface(tmp_path / 'x.pdb', frame=0, return_surface=True).area
     first = single.write_surface(tmp_path / 'x.pdb', frame=0, return_surface=True)
     assert first.atoms == two[:gsh_aa.n_atoms] and first.area == pytest.approx(alone, rel=1e-6)
-    second = single.write_surface(tmp_path / 'x.pdb', frame=0, molecule=1, return_surface=True)
+    second = single.write_surface(tmp_path / 'x.pdb', frame=0, body=1, return_surface=True)
     assert second.atoms == two[gsh_aa.n_atoms:] and second.area == pytest.approx(alone, rel=1e-6)
     with pytest.raises(IndexError):
-        single.write_surface(tmp_path / 'x.pdb', frame=0, molecule=2)
+        single.write_surface(tmp_path / 'x.pdb', frame=0, body=2)
     # median frame of the chosen molecule
-    assert single.write_surface(tmp_path / 'x.pdb', molecule=1, return_surface=True).frame in single.frames
+    assert single.write_surface(tmp_path / 'x.pdb', body=1, return_surface=True).frame in single.results.frames
 
     whole = SASA(two, ndots=240, bodies='selection')
     both = whole.write_surface(tmp_path / 'x.pdb', frame=0, return_surface=True)
@@ -146,8 +146,8 @@ def test_surface_molecules(gsh_aa, tmp_path):
     assert 'Whole selection as one body (GSH, resid 1, 72 atoms)' in both.remarks
     assert second.remarks[2].startswith('Molecule 1 of 2 (GSH, resid 1, 36 atoms)')
     with pytest.raises(IndexError, match='whole selection is one body'):
-        whole.write_surface(tmp_path / 'x.pdb', frame=0, molecule=1)
-    assert whole.write_surface(tmp_path / 'x.pdb', frame=0, molecule='selection', return_surface=True).area == both.area
+        whole.write_surface(tmp_path / 'x.pdb', frame=0, body=1)
+    assert whole.write_surface(tmp_path / 'x.pdb', frame=0, body='selection', return_surface=True).area == both.area
 
 
 def test_surface_pdb(gsh_aa, tmp_path):
@@ -180,7 +180,7 @@ def test_cli_surface(tmp_path, capsys):
     run = ['-s', TPR, '-f', XTC, '-select', 'moltype GSH', '-ndots', '240', '-skip', '50', '-o', out]
     assert main(run + ['-q', '-surface', str(surf)]) == 0
     assert 'HETATM' in dots.read_text() and 'Representative molecule and frame: GSH1' in dots.read_text()
-    assert main(run + ['-q', '-surface', str(surf), '-surface-molecule', 'GSH1']) == 0
+    assert main(run + ['-q', '-surface', str(surf), '-surface-body', 'GSH1']) == 0
     assert 'Representative frame: SASA' in (surf / 'GSH1_sasa.pdb').read_text()
 
     # the reference: frame 100, moved; the analysed frame 100 is found again
@@ -193,10 +193,10 @@ def test_cli_surface(tmp_path, capsys):
     assert main(run + ['-surface', str(surf), '-surface-ref', reference]) == 0
     assert 'frame 100 is closest to the reference' in capsys.readouterr().err
 
-    for options, message in [(['-bodies', 'selection', '-surface-molecule', '0'],
+    for options, message in [(['-bodies', 'selection', '-surface-body', '0'],
                               'cannot be combined with -bodies selection'),
-                             (['-surface-molecule', 'SOL3'], 'no molecule of the selection'),
-                             (['-surface-molecule', '5'], 'out of range'),
+                             (['-surface-body', 'SOL3'], 'no body of the selection'),
+                             (['-surface-body', '5'], 'out of range'),
                              (['-surface-frame', '9999'], 'out of range for 501 frame(s)'),
                              (['-surface', 'dots.pdb'], 'takes a directory')]:
         assert main(run + ['-q', '-surface', str(surf)] + options) == 1

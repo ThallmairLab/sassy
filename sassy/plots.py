@@ -6,8 +6,8 @@ fast_forward (0.01 nm^2 bins, density lines zoomed to the populated range).
 The functions take plain arrays, so they work for molecules, groups or atoms alike:
 ``values`` is (n_series, n_frames) SASA in nm^2 and ``times`` (n_frames,) in ps.
 
-	>>> sasa.run()
-	>>> save_plots('plots', sasa.times, sasa.molecule_sasa, total=sasa.total_sasa)
+	>>> res = sasa.run()
+	>>> save_plots('plots', res.times, res.bodies, res.body_labels, total=res.total, types=res.body_types)
 """
 import logging
 from dataclasses import dataclass, replace
@@ -420,20 +420,29 @@ def plot_distribution_panels(values: ArrayLike | list[ArrayLike], fname: str | P
 	return _save(fig, fname)
 
 
-def _with_radius(sasa, molecule: int) -> np.ndarray:
-	"""Mask of the atoms of a molecule with a radius (with SASA; no dummy beads, virtual sites)."""
-	return sasa.radii[sasa._members[molecule]] > 0
+def _with_radius(sasa, body: int) -> np.ndarray:
+	"""Mask of the atoms of a body with a radius (with SASA; no dummy beads, virtual sites)."""
+	return sasa.radii[sasa._members[body]] > 0
+
+
+def _atoms(sasa) -> np.ndarray:
+	"""(n_atoms, n_frames) SASA of every atom of the last run; RuntimeError if not kept."""
+	atoms = sasa._check_run().atoms
+	if atoms is None:
+		raise RuntimeError("The SASA of every atom was not kept (keep_atoms=False).")
+	return atoms
 
 
 def pooled_atom_sasa(sasa) -> tuple[list[str], list[np.ndarray]]:
 	"""
-	SASA of every atom of a molecule type, pooled over all molecules of that type: the
-	first atom of every GSH together, the second together, ...
+	SASA of every atom of a body type, pooled over all bodies of that type: the first
+	atom of every GSH together, the second together, ...
 
 	Molecules are of one type (:attr:`SASA.types`) if they have the same moltype (tpr), else
-	the same atom and residue names in the same order (with ``bodies='residue'``: residues of one
-	residue type); with ``bodies='selection'`` (one body) every atom is on its own. Atoms without a radius (dummy beads, virtual sites: no SASA) are left out.
-	Needs the per-atom SASA (``save_atoms=True``) of the last :meth:`SASA.run`.
+	the same atom and residue names in the same order (with ``bodies='residue'``: residues of
+	one residue type); with ``bodies='selection'`` (one body) every atom is on its own. Atoms
+	without a radius (dummy beads, virtual sites: no SASA) are left out. Needs the per-atom
+	SASA (``keep_atoms=True``) of the last :meth:`SASA.run`.
 
 	Parameters
 	----------
@@ -442,34 +451,34 @@ def pooled_atom_sasa(sasa) -> tuple[list[str], list[np.ndarray]]:
 	Returns
 	-------
 	labels : list of str
-		'<resname><resid>:<name>' of the atom in the first molecule of its type, with the
+		'<resname><resid>:<name>' of the atom in the first body of its type, with the
 		type in front if there are several types
 	pooled : list of np.ndarray
-		(n_molecules_of_type * n_frames,) SASA (nm^2) of every atom of every type
+		(n_bodies_of_type * n_frames,) SASA (nm^2) of every atom of every type
 	"""
-	sasa._check_run(atoms=True)
+	atoms = _atoms(sasa)
 	labels, pooled = [], []
-	for name, molecules in sasa.types.items():
-		members = np.stack([sasa._members[i] for i in molecules], axis=1) # (n_atoms, n_molecules) indices in ag
+	for name, bodies in sasa.types.items():
+		members = np.stack([sasa._members[i] for i in bodies], axis=1) # (n_atoms, n_bodies) indices in ag
 		prefix = f"{name} " if len(sasa.types) > 1 else ''
-		kept = _with_radius(sasa, molecules[0]) # the same for all molecules of the type
-		stacked = sasa.sasa[members[kept]] # (n_kept, n_molecules, n_frames)
+		kept = _with_radius(sasa, bodies[0]) # the same for all bodies of the type
+		stacked = atoms[members[kept]] # (n_kept, n_bodies, n_frames)
 		for atom, series in zip(sasa.ag[members[kept, 0]], stacked):
 			labels.append(f"{prefix}{atom_label(atom)}")
 			pooled.append(series.ravel())
 	return labels, pooled
 
 
-def atom_sasa_at(sasa, molecule: int, frame: int) -> dict[int, float]:
+def atom_sasa_at(sasa, body: int, frame: int) -> dict[int, float]:
 	"""
-	SASA of the atoms of one molecule in one frame, by their panel in the per-atom
+	SASA of the atoms of one body in one frame, by their panel in the per-atom
 	distributions of :func:`pooled_atom_sasa` (e.g. to highlight the frame of a surface).
 
 	Parameters
 	----------
 	sasa : SASA
-	molecule : int
-		molecule index (negative counts from the end)
+	body : int
+		body index (negative counts from the end)
 	frame : int
 		trajectory frame; must be one of the last :meth:`SASA.run`
 
@@ -478,19 +487,19 @@ def atom_sasa_at(sasa, molecule: int, frame: int) -> dict[int, float]:
 	dict of int to float
 		panel index -> SASA (nm^2); empty if the frame was not analysed
 	"""
-	sasa._check_run(atoms=True)
-	analysed = np.flatnonzero(sasa.frames == frame)
+	atoms = _atoms(sasa)
+	analysed = np.flatnonzero(sasa.results.frames == frame)
 	if not len(analysed):
 		return {}
-	molecule %= sasa.n_molecules
+	body %= sasa.n_bodies
 	offset = 0
-	for molecules in sasa.types.values():
-		kept = _with_radius(sasa, molecules[0])
-		if molecule in molecules:
-			values = sasa.sasa[sasa._members[molecule][kept], analysed[0]]
+	for bodies in sasa.types.values():
+		kept = _with_radius(sasa, bodies[0])
+		if body in bodies:
+			values = atoms[sasa._members[body][kept], analysed[0]]
 			return {offset + k: float(value) for k, value in enumerate(values)}
 		offset += int(kept.sum())
-	raise AssertionError('unreachable: every molecule has a type')
+	raise AssertionError('unreachable: every body has a type')
 
 
 def save_plots(directory: str | Path, times: ArrayLike, values: ArrayLike, labels: list[str] | None = None,
@@ -526,7 +535,7 @@ def save_plots(directory: str | Path, times: ArrayLike, values: ArrayLike, label
 		``highlight.series``) in ``sasa_distribution`` and the panel of that series, and at
 		the SASA of every atom (``highlight.atoms``) in its per-atom panel
 	types : list of str, optional
-		type of every series (e.g. :attr:`SASA.molecule_types`): with several types,
+		type of every series (e.g. :attr:`Results.body_types`): with several types,
 		``sasa_distribution`` has one panel per type (pooled over its series, each zoomed to
 		its range), ``sasa_time`` one panel per type stacked vertically (the first 25 types
 		each), and the per-series panels are ordered and colored by type

@@ -53,8 +53,8 @@ class Surface:
 		onto, None without a reference
 	remarks : list of str
 		REMARK records of the written PDB file
-	molecule : int or None
-		index of the molecule in the :class:`SASA` (from :meth:`SASA.write_surface`), else None
+	body : int or None
+		index of the body in the :class:`SASA` (from :meth:`SASA.write_surface`), else None
 	environment : MDAnalysis.AtomGroup or None
 		the environment atoms within reach of the structure (see ``environment`` of
 		:func:`generate_surface`), which bury its surface; None without an environment
@@ -70,7 +70,7 @@ class Surface:
 	time: float
 	rmsd: float | None = None
 	remarks: list[str] | None = None
-	molecule: int | None = None
+	body: int | None = None
 	environment: mda.AtomGroup | None = None
 	environment_positions: np.ndarray | None = None
 
@@ -103,8 +103,8 @@ def generate_surface(atoms: mda.AtomGroup, radii: ArrayLike | None = None, probe
 	probe : float
 		probe radius (nm)
 	block : np.ndarray, optional
-		(n_atoms,) molecule index of every atom: atoms only bury dots of atoms with the
-		same index (molecules on their own); default all atoms bury each other
+		(n_atoms,) body index of every atom: atoms only bury dots of atoms with the
+		same index (bodies on their own); default all atoms bury each other
 	frame : int, optional
 		trajectory frame (negative counts from the end); default the current frame
 	reference : np.ndarray or MDAnalysis.AtomGroup, optional

@@ -1,29 +1,58 @@
 """
-Molecules and residues of an AtomGroup: which atoms bury each other.
+Bodies of an AtomGroup: the sets of atoms that bury each other (molecules, residues or the
+whole selection), their types and labels; and atom labels.
 """
 import logging
+from typing import Literal
 import numpy as np
 import MDAnalysis as mda
 
 logger = logging.getLogger(__name__)
 
+# Bodies
+BODIES = ('molecule', 'residue', 'selection') # how an AtomGroup is split into bodies, see partition
+Bodies = Literal['molecule', 'residue', 'selection']
 
-def _rank(keys: np.ndarray) -> np.ndarray:
-	'''0, 1, ... for the distinct keys in the order of their first appearance.'''
-	_, first, inverse = np.unique(keys, return_index=True, return_inverse=True)
-	rank = np.empty(len(first), dtype=int)
-	rank[np.argsort(first)] = np.arange(len(first))
-	return rank[inverse.ravel()]
+def partition(ag: mda.AtomGroup, bodies: Bodies = 'molecule') -> tuple[np.ndarray, list[str], list[str]]:
+	"""
+	Split an AtomGroup into bodies: sets of atoms that bury each other.
+
+	Parameters
+	----------
+	ag : MDAnalysis.AtomGroup
+	bodies : str
+		'molecule': every molecule; 'residue': every residue; 'selection': the whole AtomGroup as one body
+
+	Returns
+	-------
+	index : np.ndarray
+		(n_atoms,) body of every atom, 0, 1, ... in order of appearance
+	types : list of str
+		(n_bodies,) type of every body (molecule type, residue type, or 'selection')
+	labels : list of str
+		(n_bodies,) unique label of every body (e.g. GSH2, ALA12, 'selection')
+	"""
+	if bodies == 'molecule':
+		index = molecule_index(ag)
+		types = molecule_types(ag, index)
+		return index, types, numbered_labels(types)
+	if bodies == 'residue':
+		index = residue_index(ag)
+		return index, residue_types(ag, index), residue_labels(ag, index)
+	if bodies == 'selection':
+		return np.zeros(ag.n_atoms, dtype=int), ['selection'] * bool(ag.n_atoms), ['selection'] * bool(ag.n_atoms)
+	raise ValueError(f"bodies must be one of {', '.join(BODIES)}, got {bodies!r}.")
 
 
-def _has_bonds(ag: mda.AtomGroup) -> bool:
-	'''Whether the topology has bonds (e.g. tpr, psf, PDB with CONECT records).'''
-	try:
-		return hasattr(ag.universe.atoms, 'bonds') and len(ag.universe.bonds) > 0
-	except Exception: # e.g. no bond information after all
-		return False
+# Atoms
+def atom_label(atom: mda.core.groups.Atom) -> str:
+	'''Short name of an atom: ``<resname><resid>:<name>``, e.g. ``GSH1:SG``.'''
+	resname = getattr(atom, 'resname', '')
+	resid = getattr(atom, 'resid', atom.resindex + 1)
+	return f"{resname}{resid}:{getattr(atom, 'name', atom.index)}"
 
 
+# Molecules
 def molecule_index(ag: mda.AtomGroup) -> np.ndarray:
 	'''
 	Molecule index of every atom in ag, 0, 1, ... in the order in which the molecules appear.
@@ -36,12 +65,8 @@ def molecule_index(ag: mda.AtomGroup) -> np.ndarray:
 	3. without atom names: the residues,
 	4. else ``ag`` is taken as consecutive copies of one molecule: the shortest repeating
 	   unit of atoms with the same atom names, residue names and resids (up to an offset
-	   per copy) in the same order, see :func:`copy_length`. If nothing repeats, ``ag`` is
-	   a single molecule, with a warning if it spans several residues.
-
-	Bonds are not guessed: guessing is slow for large systems and unreliable for
-	coarse-grained models (guess them in MDAnalysis first if wanted, e.g.
-	``universe.guess_TopologyAttrs(to_guess=['bonds'])``).
+	   per copy) in the same order. If nothing repeats, a single residue is a single
+	   molecule; several residues raise a ValueError (use a tpr, or change the selection).
 	'''
 	if ag.n_atoms == 0:
 		return np.zeros(0, dtype=int)
@@ -54,66 +79,11 @@ def molecule_index(ag: mda.AtomGroup) -> np.ndarray:
 	if not hasattr(ag.atoms, 'names'):
 		logger.debug("molecules from the residues of the topology")
 		return _rank(ag.resindices)
-	return np.arange(ag.n_atoms) // max(1, copy_length(ag))
-
-def copy_length(ag: mda.AtomGroup) -> int:
-	'''
-	Number of atoms in the repeating molecule.
-	Molecule is  the shortest unit of which ``ag`` consists of consecutive
-	copies: every copy has the same atom names and residue names in the same
-	order, and the same resids order of resids.
-	'''
-	n = ag.n_atoms
-	if n == 0:
-		return 0
-	
-	# convert names and resnames to unique integers
-	labels = [np.unique(getattr(ag, attr), return_inverse=True)[1].ravel()
-	          for attr in ('names', 'resnames') if hasattr(ag.atoms, attr)] 
-	resids = np.asarray(ag.resids if hasattr(ag.atoms, 'resids') else ag.resindices, dtype=np.int64)
-
-	# find shortest length that repeats to make the whole AtomGroup
-	for length in range(1, n):
-		if n % length:
-			continue
-		copies = n // length
-		# check if every copy has the same names/resnames and resids
-		if not all((label.reshape(copies, length) == label[:length]).all() for label in labels): 
-			continue
-		relative = resids.reshape(copies, length) - resids[::length, None]
-		if (relative == relative[0]).all():
-			logger.debug("molecules from repeating units: %d copies of %d atoms", copies, length)
-			return length
-	if len(np.unique(ag.resindices)) == 1: # a single residue: most likely a single molecule, no reason to warn
-		logger.debug("molecules: no repeating unit in %d atoms of one residue, taken as one molecule", n)
-		return n
-	logger.warning("no molecules found: the topology has neither molecules (molnums, e.g. tpr) nor bonds, and "
-	               "%d atoms are no consecutive copies of one molecule; treating the selection as one molecule "
-	               "(use a tpr or a topology with bonds, select one molecule type, or use whole mode)", n)
-	return n
-
-def split_molecules(ag: mda.AtomGroup) -> list[mda.AtomGroup]:
-	'''
-	Split ``ag`` into its molecules (see :func:`molecule_index`), in the order in
-	which they appear.
-	'''
-	return [ag[members] for members in molecule_members(molecule_index(ag))]
-
-def molecule_members(molecules: np.ndarray, n_molecules: int | None = None) -> list[np.ndarray]:
-	'''
-	Atoms of every molecule: for every molecule index 0, 1, ... the (sorted) positions in
-	``molecules`` (the molecule index of every atom, see :func:`molecule_index`) of its atoms.
-	One pass over all atoms, instead of one comparison of all atoms per molecule.
-	'''
-	molecules = np.asarray(molecules, dtype=np.int64)
-	if n_molecules is None:
-		n_molecules = int(molecules.max()) + 1 if len(molecules) else 0
-	order = np.argsort(molecules, kind='stable')
-	return np.split(order, np.cumsum(np.bincount(molecules, minlength=n_molecules))[:-1]) if n_molecules else []
+	return np.arange(ag.n_atoms) // max(1, _copy_length(ag))
 
 def molecule_types(ag: mda.AtomGroup, molecules: np.ndarray | None = None) -> list[str]:
 	'''
-	Type name of every molecule (see :func:`molecule_index`): its moltype (tpr), else
+	Type name of every molecule: its moltype (tpr), else
 	the residue name of its first atom, for molecules with the same atom names and residue
 	names in the same order. Different molecules starting with the same residue name are
 	told apart by a suffix (e.g. ALA, ALA_2).
@@ -135,27 +105,51 @@ def molecule_types(ag: mda.AtomGroup, molecules: np.ndarray | None = None) -> li
 		return [str(name) for name in ag.moltypes[first]]
 	return _signature_types(ag, molecules, 'molecule')
 
-def _signature_types(ag: mda.AtomGroup, index: np.ndarray, fallback: str) -> list[str]:
-	"""
-	Type name of every set of atoms of ``index`` (0, 1, ...): the residue name of its first
-	atom (``fallback`` without residue names), for sets with the same atom names and residue
-	names in the same order; different sets with the same first residue name are told
-	apart by a suffix (e.g. ALA, ALA_2).
-	"""
-	n = int(index.max()) + 1 if len(index) else 0
-	values = [getattr(ag, attr) for attr in ('names', 'resnames') if hasattr(ag.atoms, attr)]
-	resnames = ag.resnames if hasattr(ag.atoms, 'resnames') else None
-	names, signatures, bases = [], {}, {} # signature (names, resnames) -> type name; base -> count
-	for members in molecule_members(index, n):
-		signature = tuple(tuple(value[members].tolist()) for value in values)
-		if signature not in signatures:
-			base = str(resnames[members[0]]) if resnames is not None else fallback
-			bases[base] = bases.get(base, 0) + 1
-			signatures[signature] = base if bases[base] == 1 else f"{base}_{bases[base]}"
-		names.append(signatures[signature])
-	return names
+def _has_bonds(ag: mda.AtomGroup) -> bool:
+	'''Whether the topology has bonds (e.g. tpr, psf, PDB with CONECT records).'''
+	try:
+		return hasattr(ag.universe.atoms, 'bonds') and len(ag.universe.bonds) > 0
+	except Exception: # e.g. no bond information after all
+		return False
+
+def _copy_length(ag: mda.AtomGroup) -> int:
+	'''
+	Number of atoms in the repeating molecule: the shortest unit of which ``ag`` consists
+	of consecutive copies, every copy with the same atom names and residue names in the
+	same order and the same resids up to an offset. Without a repeating unit, a single
+	residue is one molecule (all its atoms); several residues raise a ValueError.
+	'''
+	n = ag.n_atoms
+	if n == 0:
+		return 0
+
+	# convert names and resnames to unique integers
+	labels = [np.unique(getattr(ag, attr), return_inverse=True)[1].ravel()
+	          for attr in ('names', 'resnames') if hasattr(ag.atoms, attr)]
+	resids = np.asarray(ag.resids if hasattr(ag.atoms, 'resids') else ag.resindices, dtype=np.int64)
+
+	# find shortest length that repeats to make the whole AtomGroup
+	for length in range(1, n):
+		if n % length:
+			continue
+		copies = n // length
+		# check if every copy has the same names/resnames and resids
+		if not all((label.reshape(copies, length) == label[:length]).all() for label in labels):
+			continue
+		relative = resids.reshape(copies, length) - resids[::length, None]
+		if (relative == relative[0]).all():
+			logger.debug("molecules from repeating units: %d copies of %d atoms", copies, length)
+			return length
+	if len(np.unique(ag.resindices)) == 1: # a single residue: a single molecule
+		logger.debug("molecules: no repeating unit in %d atoms of one residue, taken as one molecule", n)
+		return n
+	raise ValueError(f"No molecules found: the topology has neither molecules (molnums, e.g. tpr) nor bonds, and "
+	                 f"the {n} atoms of the selection are no consecutive copies of one molecule. Use a tpr (or a "
+	                 f"topology with bonds), or change the selection (e.g. to one molecule type); or choose the "
+	                 f"bodies explicitly: bodies='selection' or 'residue' (-bodies selection / residue).")
 
 
+# Residues
 def residue_index(ag: mda.AtomGroup) -> np.ndarray:
 	'''Residue index of every atom in ag, 0, 1, ... in the order in which the residues appear.'''
 	return _rank(ag.resindices) if ag.n_atoms else np.zeros(0, dtype=int)
@@ -198,16 +192,43 @@ def residue_labels(ag: mda.AtomGroup, residues: np.ndarray | None = None) -> lis
 	return unique
 
 
-def atom_label(atom: mda.core.groups.Atom) -> str:
-	'''Short name of an atom: ``<resname><resid>:<name>``, e.g. ``GSH1:SG``.'''
-	resname = getattr(atom, 'resname', '')
-	resid = getattr(atom, 'resid', atom.resindex + 1)
-	return f"{resname}{resid}:{getattr(atom, 'name', atom.index)}"
-
-
-def molecule_labels(types: list[str]) -> list[str]:
+# Helpers for any index: molecules, residues or bodies
+def members(index: np.ndarray, n: int | None = None) -> list[np.ndarray]:
 	'''
-	Label of every molecule: its type numbered from 1 within the type, e.g.
+	The atoms of every body: inverts a per-atom index (which body every atom belongs to)
+	into a list of the atoms of every body.
+
+	Parameters
+	----------
+	index : np.ndarray
+		(n_atoms,) index of body for every atom
+	n : int, optional
+		number of bodies
+
+	Returns
+	-------
+	list of np.ndarray
+		(n,) for every body the index of its atoms, in increasing order; ``ag[members(index)[k]]`` are the atoms of body k
+	'''
+	index = np.asarray(index, dtype=np.int64)
+	if n is None:
+		n = int(index.max()) + 1 if len(index) else 0
+	order = np.argsort(index, kind='stable')
+	return np.split(order, np.cumsum(np.bincount(index, minlength=n))[:-1]) if n else []
+
+def type_members(types: list[str]) -> dict[str, np.ndarray]:
+	'''
+	Indices of every type: {type: indices of its entries in ``types``}, types in the order of
+	first appearance, e.g. ['GSH', 'SOL', 'GSH'] -> {'GSH': array([0, 2]), 'SOL': array([1])}.
+	'''
+	indices = {}
+	for i, name in enumerate(types):
+		indices.setdefault(name, []).append(i)
+	return {name: np.array(found) for name, found in indices.items()}
+
+def numbered_labels(types: list[str]) -> list[str]:
+	'''
+	Label of every set from its type: the type numbered from 1 within the type, e.g.
 	['GSH', 'GSH', 'SOL'] -> ['GSH1', 'GSH2', 'SOL1'].
 	'''
 	counts, labels = {}, []
@@ -216,9 +237,29 @@ def molecule_labels(types: list[str]) -> list[str]:
 		labels.append(f"{name}{counts[name]}")
 	return labels
 
+def _rank(keys: np.ndarray) -> np.ndarray:
+	'''0, 1, ... for the distinct keys in the order of their first appearance.'''
+	_, first, inverse = np.unique(keys, return_index=True, return_inverse=True)
+	rank = np.empty(len(first), dtype=int)
+	rank[np.argsort(first)] = np.arange(len(first))
+	return rank[inverse.ravel()]
 
-def n_molecule_types(ag: mda.AtomGroup) -> int:
-	'''
-	Number of different molecule types in ``ag`` (see :func:`molecule_types`).
-	'''
-	return len(set(molecule_types(ag))) if ag.n_atoms else 0
+def _signature_types(ag: mda.AtomGroup, index: np.ndarray, fallback: str) -> list[str]:
+	"""
+	Type name of every set of atoms of ``index``: the residue name of its first
+	atom (``fallback`` without residue names), for sets with the same atom names and residue
+	names in the same order; different sets with the same first residue name are told
+	apart by a suffix (e.g. ALA, ALA_2).
+	"""
+	n = int(index.max()) + 1 if len(index) else 0
+	values = [getattr(ag, attr) for attr in ('names', 'resnames') if hasattr(ag.atoms, attr)]
+	resnames = ag.resnames if hasattr(ag.atoms, 'resnames') else None
+	names, signatures, bases = [], {}, {} # signature (names, resnames) -> type name; base -> count
+	for atoms in members(index, n):
+		signature = tuple(tuple(value[atoms].tolist()) for value in values)
+		if signature not in signatures:
+			base = str(resnames[atoms[0]]) if resnames is not None else fallback
+			bases[base] = bases.get(base, 0) + 1
+			signatures[signature] = base if bases[base] == 1 else f"{base}_{bases[base]}"
+		names.append(signatures[signature])
+	return names

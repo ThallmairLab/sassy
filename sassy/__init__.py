@@ -16,16 +16,20 @@ atomistic systems, a bead in coarse-grained ones.
 >>> import MDAnalysis as mda
 >>> from sassy import SASA
 >>> u = mda.Universe('topol.tpr', 'traj.xtc')
->>> sasa = SASA(u.select_atoms('moltype GSH')).run()   # (n_molecules, n_frames), nm^2
+>>> res = SASA(u.select_atoms('moltype GSH')).run()   # Results
+>>> res.bodies, res.body_labels, res.total                    # (n_bodies, n_frames) nm^2, ['GSH1', ...], (n_frames,)
 >>> ligand = SASA(u.select_atoms('resname LIG'), environment='protein', buried=True)
+>>> ligand.run().total, ligand.buried.total             # uncovered by the protein, buried by it
+>>> ligand.save('ligand.npz'); load('ligand.npz').buried.total
 """
 from .dots import unit_dots, ico_dot_arc, ico_dot_dod
 from .engine import surface_dots, warn_coincident
 from .environment import environment_copies
-from .groups import (copy_length, molecule_index, molecule_labels, molecule_types, n_molecule_types, split_molecules,
+from .groups import (BODIES, atom_label, molecule_index, molecule_types, numbered_labels, partition,
                      residue_index, residue_labels, residue_types)
 from .radii import AA_RADII, CG_RADII, PROBE_RADIUS, atom_radii, atom_symbols, radii_remarks
-from .sasa import BODIES, N_DOTS, SASA, partition
+from .results import COLUMNS, Results, Saved, load
+from .sasa import N_DOTS, SASA
 from .units import to_angstrom, to_nm
 from .surface import SURFACE_DOTS, Surface, STATISTICS, best_matching_frame, closest_to, generate_surface
 
@@ -36,11 +40,11 @@ except importlib.metadata.PackageNotFoundError: # run from the source tree witho
 	__version__ = "0+unknown"
 
 __all__ = [
-	"SASA", "N_DOTS", "BODIES", "partition", "surface_dots", "warn_coincident", "environment_copies",
+	"SASA", "N_DOTS", "BODIES", "partition", "Results", "Saved", "load", "COLUMNS", "surface_dots", "warn_coincident", "environment_copies",
 	"to_nm", "to_angstrom",
 	"Surface", "SURFACE_DOTS", "STATISTICS", "best_matching_frame", "closest_to", "generate_surface",
 	"unit_dots", "ico_dot_arc", "ico_dot_dod",
-	"copy_length", "molecule_index", "molecule_labels", "molecule_types", "n_molecule_types", "split_molecules",
+	"atom_label", "molecule_index", "molecule_types", "numbered_labels",
 	"residue_index", "residue_labels", "residue_types",
 	"AA_RADII", "CG_RADII", "PROBE_RADIUS", "atom_radii", "atom_symbols", "radii_remarks",
 ]

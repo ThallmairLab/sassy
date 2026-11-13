@@ -16,22 +16,23 @@ def read_xvg(path):
 
 
 def test_cli_molecules(tmp_path):
-    """The xvg has the time and one column per molecule, equal to SASA.run()."""
+    """The xvg has the time and one column per molecule, equal to SASA.run().bodies."""
     out = tmp_path / 'sasa.xvg'
     assert main(['-s', TPR, '-f', XTC, '-select', 'moltype GSH', '-ndots', '240',
-                 '-skip', '25', '-total', '-q', '-o', str(out)]) == 0
+                 '-skip', '25', '-columns', 'bodies', 'total', '-q', '-o', str(out)]) == 0
     data, legends = read_xvg(out)
     universe = mda.Universe(TPR, XTC)
     sasa = SASA(universe.select_atoms('moltype GSH'), ndots=240)
-    expected = sasa.run(step=25)
+    expected = sasa.run(step=25).bodies
     assert legends == ['GSH1', 'total']
-    assert np.allclose(data[:, 0], sasa.times, atol=1e-3)
+    assert np.allclose(data[:, 0], sasa.results.times, atol=1e-3)
     assert np.allclose(data[:, 1], expected[0], atol=1e-4)
     assert np.allclose(data[:, 2], expected.sum(axis=0), atol=1e-4)
 
 
 def test_cli_groups_atoms_npz(tmp_path):
-    """Groups, per-atom columns and npz output."""
+    """Groups, per-atom columns, combined levels and npz output (all results, and the table)."""
+    from sassy import load
     out = tmp_path / 'groups.npz'
     assert main(['-s', TPR, '-f', XTC, '-select', 'moltype GSH', '-ndots', '240', '-e', '3',
                  '-group', 'name S*', '-group', 'name C*', '-q', '-o', str(out)]) == 0
@@ -39,13 +40,26 @@ def test_cli_groups_atoms_npz(tmp_path):
     universe = mda.Universe(TPR, XTC)
     sasa = SASA(universe.select_atoms('moltype GSH'), ndots=240)
     sasa.run(stop=3)
-    assert result['labels'].tolist() == ['name S*', 'name C*']
+    assert result['column_labels'].tolist() == ['name S*', 'name C*']
     assert result['frames'].tolist() == [0, 1, 2]
-    assert np.allclose(result['sasa'], [sasa.get_sasa('name S*'), sasa.get_sasa('name C*')])
+    assert np.allclose(result['columns'], [sasa.results.select('name S*'), sasa.results.select('name C*')])
+    saved = load(out, universe)
+    assert np.allclose(saved.results.bodies, sasa.results.bodies) and saved.results.body_labels == ['GSH1']
+    assert np.allclose(saved.results.select('name S*'), sasa.results.select('name S*'))
+    assert saved.meta['selection'] == 'moltype GSH' and saved.meta['bodies'] == 'molecule'
+    assert saved.meta['command'].startswith('sassy -s')
+
+    # levels and groups combined, in order
+    out = tmp_path / 'all.xvg'
+    assert main(['-s', TPR, '-f', XTC, '-select', 'moltype GSH', '-ndots', '240', '-e', '3', '-columns', 'total',
+                 'types', 'bodies', 'total', '-group', 'name S*', '-q', '-o', str(out)]) == 0
+    data, legends = read_xvg(out)
+    assert legends == ['total', 'GSH', 'GSH1', 'name S*']
+    assert np.allclose(data[:, 1:4].T, [sasa.results.total] * 3, atol=1e-4)
 
     out = tmp_path / 'atoms.xvg'
     assert main(['-s', TPR, '-f', XTC, '-select', 'moltype GSH', '-ndots', '240', '-e', '2',
-                 '-per-atom', '-radius', 'S=0.18', '-q', '-o', str(out)]) == 0
+                 '-columns', 'atoms', '-radius', 'S=0.18', '-q', '-o', str(out)]) == 0
     data, legends = read_xvg(out)
     assert data.shape == (2, 1 + sasa.ag.n_atoms)
     assert legends[0].startswith('GSH1:')
@@ -60,7 +74,7 @@ def test_cli_errors(tmp_path, capsys):
     assert 'contains no atoms' in capsys.readouterr().err
     assert main(['-s', TPR, '-f', XTC, '-group', 'name XYZ', '-q', '-o', str(tmp_path / 'x.xvg')]) == 1
     with pytest.raises(SystemExit):
-        main(['-s', TPR, '-per-atom', '-group', 'all'])
+        main(['-s', TPR, '-columns', 'residues'])
     with pytest.raises(SystemExit):
         main(['-s', TPR, '-radius', 'Na0.2'])
 
@@ -83,9 +97,9 @@ def test_cli_whole_selection(tmp_path):
     pdb = two_gsh(tmp_path, 4.0) # overlapping copies
     whole, single = tmp_path / 'whole.xvg', tmp_path / 'single.xvg'
     assert main(['-s', pdb, '-ndots', '240', '-bodies', 'selection', '-q', '-o', str(whole)]) == 0
-    assert main(['-s', pdb, '-ndots', '240', '-total', '-q', '-o', str(single)]) == 0
+    assert main(['-s', pdb, '-ndots', '240', '-columns', 'bodies', 'total', '-q', '-o', str(single)]) == 0
     whole, legends = read_xvg(whole)
-    assert legends == ['all']
+    assert legends == ['selection']
     single, legends = read_xvg(single)
     assert legends == ['GSH1', 'GSH2', 'total']
     assert single[1] == pytest.approx(single[2])
@@ -100,19 +114,19 @@ def test_cli_whole_selection(tmp_path):
 @pytest.mark.filterwarnings('ignore::UserWarning') # MDAnalysis writing and reading the PDB
 def test_cli_molecule_types_warning(tmp_path, capsys):
     """Per molecule (default) warns about a selection of several molecule types, -bodies selection does not."""
-    from sassy import n_molecule_types
+    from sassy import molecule_types
     gsh = mda.Universe(TPR, XTC).select_atoms('moltype GSH')
-    assert n_molecule_types(gsh) == 1
+    assert len(set(molecule_types(gsh))) == 1
     two = mda.Merge(gsh, gsh)
     two.add_TopologyAttr('molnums', [0, 1])
     two.add_TopologyAttr('moltypes', ['GSH', 'GSH'])
-    assert n_molecule_types(two.atoms) == 1
+    assert len(set(molecule_types(two.atoms))) == 1
     two.residues[1].moltype = 'OTHER'
-    assert n_molecule_types(two.atoms) == 2
+    assert len(set(molecule_types(two.atoms))) == 2
     two.del_TopologyAttr('moltypes') # without moltypes: by atom and residue names
-    assert n_molecule_types(two.atoms) == 1
+    assert len(set(molecule_types(two.atoms))) == 1
     two.residues[1].resname = 'OTH'
-    assert n_molecule_types(two.atoms) == 2
+    assert len(set(molecule_types(two.atoms))) == 2
 
     # two molecule types in a PDB file with bonds (the molecules from the bonds), once each
     two.atoms[gsh.n_atoms:].positions += 50 # apart: no overlap as one body
@@ -178,7 +192,7 @@ def test_cli_output_formats(tmp_path, capsys):
     run = ['-s', TPR, '-f', XTC, '-e', '2', '-ndots', '240', '-q']
     out = tmp_path / 'new' / 'x.NPZ'
     assert main(run + ['-o', str(out)]) == 0
-    assert np.load(out)['sasa'].shape == (1, 2)
+    assert np.load(out)['columns'].shape == (1, 2) and np.load(out)['bodies'].shape == (1, 2)
     out = tmp_path / 'x.dat'
     assert main(run + ['-o', str(out)]) == 0
     assert 'unknown extension' in capsys.readouterr().err
@@ -204,7 +218,7 @@ def test_cli_residue_bodies(tmp_path):
     pdb = str(tmp_path / 'three.pdb')
     three.atoms.write(pdb)
     out = tmp_path / 'x.xvg'
-    assert main(['-s', pdb, '-ndots', '240', '-bodies', 'residue', '-total', '-q', '-o', str(out)]) == 0
+    assert main(['-s', pdb, '-ndots', '240', '-bodies', 'residue', '-columns', 'bodies', 'total', '-q', '-o', str(out)]) == 0
     data, legends = read_xvg(out)
     assert legends == ['GSH1', 'GSH2', 'GSH3', 'total']
     assert data[1] == pytest.approx(data[2], abs=1e-3) # copies, each on its own

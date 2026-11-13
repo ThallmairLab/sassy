@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import MDAnalysis as mda
 
-from sassy import SASA, molecule_index, molecule_labels, molecule_types, n_molecule_types
+from sassy import SASA, molecule_index, numbered_labels, molecule_types
 from sassy.plots import Highlight, save_plots
 
 
@@ -25,8 +25,8 @@ def mixed(gsh, types=('GSH', 'GSX', 'GSH'), molnums=True, bonds=True):
     return u
 
 
-def test_molecules_from_bonds(gsh_aa, caplog):
-    """Without molnums, bonds split any mix of molecules; without both, one molecule and a warning."""
+def test_molecules_from_bonds(gsh_aa):
+    """Without molnums, bonds split any mix of molecules; without both, a mix raises an error."""
     n = gsh_aa.n_atoms
     u = mixed(gsh_aa, molnums=False)
     assert molecule_index(u.atoms).tolist() == np.repeat([0, 1, 2], n).tolist()
@@ -34,9 +34,8 @@ def test_molecules_from_bonds(gsh_aa, caplog):
     assert molecule_index(u.atoms[n - 2:n + 2]).tolist() == [0, 0, 1, 1]
     # neither molnums nor bonds: a mix does not repeat
     u = mixed(gsh_aa, molnums=False, bonds=False)
-    with caplog.at_level(logging.WARNING):
-        assert molecule_index(u.atoms).tolist() == [0] * 3 * n
-    assert 'no molecules found' in caplog.text
+    with pytest.raises(ValueError, match='No molecules found: the topology has neither molecules'):
+        molecule_index(u.atoms)
     # copies of one type still repeat
     assert molecule_index(mixed(gsh_aa, ('GSH', 'GSH'), molnums=False, bonds=False).atoms).max() == 1
 
@@ -44,32 +43,33 @@ def test_molecules_from_bonds(gsh_aa, caplog):
 def test_molecule_types(gsh_aa):
     u = mixed(gsh_aa) # moltypes
     assert molecule_types(u.atoms) == ['GSH', 'GSX', 'GSH']
-    assert molecule_labels(molecule_types(u.atoms)) == ['GSH1', 'GSX1', 'GSH2']
+    assert numbered_labels(molecule_types(u.atoms)) == ['GSH1', 'GSX1', 'GSH2']
     u = mixed(gsh_aa, molnums=False) # by atom and residue names
     assert molecule_types(u.atoms) == ['GSH', 'GSX', 'GSH']
     # same first residue name, different atoms: told apart
     u.atoms[gsh_aa.n_atoms + 3].name = 'XX'
     u.residues[1].resname = 'GSH'
-    assert molecule_types(u.atoms) == ['GSH', 'GSH_2', 'GSH'] and n_molecule_types(u.atoms) == 2
-    assert molecule_types(u.atoms[:0]) == [] and n_molecule_types(u.atoms[:0]) == 0
+    assert molecule_types(u.atoms) == ['GSH', 'GSH_2', 'GSH'] and len(set(molecule_types(u.atoms))) == 2
+    assert molecule_types(u.atoms[:0]) == [] and len(set(molecule_types(u.atoms[:0]))) == 0
 
 
 def test_sasa_types(gsh_aa):
     sasa = SASA(mixed(gsh_aa).atoms, ndots=240)
-    assert sasa.molecule_labels == ['GSH1', 'GSX1', 'GSH2']
+    assert sasa.body_labels == ['GSH1', 'GSX1', 'GSH2']
     assert {name: list(indices) for name, indices in sasa.types.items()} == {'GSH': [0, 2], 'GSX': [1]}
     sasa.run(stop=3)
-    assert np.array_equal(sasa.get_molecule_sasa('GSH2'), sasa.get_molecule_sasa(2))
-    assert np.array_equal(sasa.get_type_sasa('GSH'), sasa.molecule_sasa[[0, 2]])
-    assert np.allclose(sasa.get_type_sasa('GSH', total=True) + sasa.get_type_sasa('GSX', total=True),
-                       sasa.total_sasa)
-    assert sasa.molecule_atoms('GSX1') == sasa.molecule_atoms(1)
+    assert np.array_equal(sasa.results.body('GSH2'), sasa.results.body(2))
+    assert np.array_equal(sasa.results.by_type(per_body=True)['GSH'], sasa.results.bodies[[0, 2]])
+    assert np.allclose(sasa.results.by_type()['GSH'] + sasa.results.by_type()['GSX'],
+                       sasa.results.total)
+    assert sasa.body_atoms('GSX1') == sasa.body_atoms(1)
     with pytest.raises(KeyError, match='GSH3'):
-        sasa.get_molecule_sasa('GSH3')
-    with pytest.raises(KeyError, match='types'):
-        sasa.get_type_sasa('SOL')
+        sasa.results.body('GSH3')
+    with pytest.raises(KeyError, match='No body type'):
+        sasa.representative('SOL')
+    assert list(sasa.results.by_type()) == ['GSH', 'GSX'] and sasa.results.types.keys() == sasa.types.keys()
     whole = SASA(mixed(gsh_aa).atoms, ndots=240, bodies='selection')
-    assert whole.molecule_labels == ['selection'] and list(whole.types) == ['selection']
+    assert whole.body_labels == ['selection'] and list(whole.types) == ['selection']
 
 
 def test_plots_by_type(tmp_path, monkeypatch):
@@ -81,7 +81,7 @@ def test_plots_by_type(tmp_path, monkeypatch):
     rng = np.random.default_rng(0)
     times, values = np.arange(50) * 10.0, rng.normal(6.0, 0.2, (12, 50))
     types = ['GSH', 'SOL'] * 6
-    labels = molecule_labels(types)
+    labels = numbered_labels(types)
     highlight = Highlight(time=100.0, sasa=float(values[3, 10]), series=3, label='surface frame 10 (SOL2)')
     marks = {}
     from sassy import plots
@@ -121,7 +121,7 @@ def test_time_panels_by_type(tmp_path, monkeypatch):
     rng = np.random.default_rng(1)
     times, values = np.arange(30) * 10.0, rng.normal(6.0, 0.2, (13, 30))
     types = ['GSH'] * 3 + ['SOL'] * 10 # SOL: more than 8, faint lines and a mean
-    labels = molecule_labels(types)
+    labels = numbered_labels(types)
     highlight = Highlight(time=50.0, sasa=float(values[4, 5]), series=4, label='surface frame 5 (SOL2)')
     plots.plot_time(times, values, tmp_path / 't.png', labels, highlight=highlight, types=types)
     axes = figures[-1].axes
@@ -153,31 +153,31 @@ def test_surface_per_type(gsh_aa, tmp_path):
     sasa = SASA(u.atoms, ndots=240, radii=radii)
     sasa.run(step=2)
     for name in ('GSH', 'GSX'):
-        values = sasa.get_type_sasa(name)
+        values = sasa.results.by_type(per_body=True)[name]
         for statistic in ('median', 'mean', 'q3'):
             molecule, frame, target = sasa.representative(name, statistic)
             from sassy.surface import STATISTICS
             assert target == pytest.approx(STATISTICS[statistic](values.ravel()))
-            column = np.flatnonzero(sasa.frames == frame)[0]
+            column = np.flatnonzero(sasa.results.frames == frame)[0]
             assert molecule in sasa.types[name]
-            assert abs(sasa.molecule_sasa[molecule, column] - target) == pytest.approx(np.abs(values - target).min())
+            assert abs(sasa.results.bodies[molecule, column] - target) == pytest.approx(np.abs(values - target).min())
     assert sasa.representative('GSH')[2] != pytest.approx(sasa.representative('GSX')[2]) # own medians
     # a fixed frame: only the molecule is chosen
-    frame = int(sasa.frames[3])
+    frame = int(sasa.results.frames[3])
     molecule, chosen, target = sasa.representative('GSH', frame=frame)
-    assert chosen == frame and molecule == [0, 2][np.argmin(np.abs(sasa.molecule_sasa[[0, 2], 3] - target))]
+    assert chosen == frame and molecule == [0, 2][np.argmin(np.abs(sasa.results.bodies[[0, 2], 3] - target))]
     assert sasa.representative('GSH', frame=1)[:2] == (0, 1) # not analysed: the first molecule
     # write_surface by type
-    surface = sasa.write_surface(tmp_path / 'GSX_sasa.pdb', molecule_type='GSX', return_surface=True)
-    assert surface.molecule == 1 and surface.frame == sasa.representative('GSX')[1]
+    surface = sasa.write_surface(tmp_path / 'GSX_sasa.pdb', body_type='GSX', return_surface=True)
+    assert surface.body == 1 and surface.frame == sasa.representative('GSX')[1]
     assert any(r.startswith('Representative molecule and frame: GSX1 in frame') and
                '1 GSX molecule(s) x' in r for r in surface.remarks)
     # one molecule: its frame closest to the statistic of its type
-    target = np.median(sasa.get_type_sasa('GSH'))
-    surface = sasa.write_surface(tmp_path / 'x.pdb', molecule='GSH2', return_surface=True)
-    assert surface.frame == sasa.frames[np.argmin(np.abs(sasa.get_molecule_sasa(2) - target))]
+    target = np.median(sasa.results.by_type(per_body=True)['GSH'])
+    surface = sasa.write_surface(tmp_path / 'x.pdb', body='GSH2', return_surface=True)
+    assert surface.frame == sasa.results.frames[np.argmin(np.abs(sasa.results.body(2) - target))]
     with pytest.raises(KeyError):
-        sasa.write_surface(tmp_path / 'x.pdb', molecule_type='SOL')
+        sasa.write_surface(tmp_path / 'x.pdb', body_type='SOL')
 
 
 def test_plots_several_highlights(tmp_path, monkeypatch):
@@ -192,7 +192,7 @@ def test_plots_several_highlights(tmp_path, monkeypatch):
     types = ['GSH', 'SOL', 'GSH', 'SOL']
     h = [Highlight(50.0, float(values[2, 5]), 2, 'surface frame 5 (GSH2)', atoms={0: 0.1}),
          Highlight(70.0, float(values[1, 7]), 1, 'surface frame 7 (SOL1)', atoms={3: 0.2})]
-    save_plots(tmp_path, times, values, molecule_labels(types), highlight=h, types=types,
+    save_plots(tmp_path, times, values, numbered_labels(types), highlight=h, types=types,
                atoms=[rng.random(10) for _ in range(4)], atom_labels=list('abcd'))
     marks = dict(calls)
     assert marks['sasa_distribution.png'] == {0: [(h[0].sasa, h[0].label)], 1: [(h[1].sasa, h[1].label)]}
@@ -209,23 +209,23 @@ def test_residue_bodies(gsh_aa, tmp_path):
     from sassy import residue_labels, residue_types
     from test_environment import copies
     single = SASA(gsh_aa, ndots=240, bodies='residue')
-    assert single.molecule_labels == ['GSH1'] and single.molecule_types == ['GSH']
-    assert np.allclose(single.run(stop=4), SASA(gsh_aa, ndots=240).run(stop=4), rtol=1e-12)
+    assert single.body_labels == ['GSH1'] and single.body_types == ['GSH']
+    assert np.allclose(single.run(stop=4).bodies, SASA(gsh_aa, ndots=240).run(stop=4).bodies, rtol=1e-12)
 
     u = copies(gsh_aa, [0.0, 4.0, -4.0]) # three overlapping residues ...
     u.residues.molnums = [0, 0, 0] # ... of one molecule
     molecule = SASA(u.atoms, ndots=240)
-    assert molecule.n_molecules == 1
+    assert molecule.n_bodies == 1
     molecule.run(stop=4)
     residues = SASA(u.atoms, ndots=240, bodies='residue')
-    assert residues.molecule_labels == ['GSH1', 'GSH2', 'GSH3'] and list(residues.types) == ['GSH']
+    assert residues.body_labels == ['GSH1', 'GSH2', 'GSH3'] and list(residues.types) == ['GSH']
     residues.run(stop=4)
-    alone = SASA(gsh_aa, ndots=240).run(stop=4)[0]
-    assert np.allclose(residues.molecule_sasa, alone, rtol=1e-6) # each residue on its own
+    alone = SASA(gsh_aa, ndots=240).run(stop=4).bodies[0]
+    assert np.allclose(residues.results.bodies, alone, rtol=1e-6) # each residue on its own
     for k in range(3): # in the molecule, a residue is buried by the others
-        assert np.all(molecule.get_sasa(f'resid {k + 1}') < residues.molecule_sasa[k])
+        assert np.all(molecule.results.select(f'resid {k + 1}') < residues.results.bodies[k])
     assert 'Residue 1 of 3 (GSH, resid 2, 36 atoms), on its own' in \
-        residues.write_surface(tmp_path / 'x.pdb', molecule='GSH2', return_surface=True).remarks
+        residues.write_surface(tmp_path / 'x.pdb', body='GSH2', return_surface=True).remarks
 
     # duplicate resids: the segid, else a number; other atoms: another type
     u.residues.resids = [1, 1, 1]
@@ -238,7 +238,7 @@ def test_residue_bodies(gsh_aa, tmp_path):
 
 def test_bodies_argument(gsh_aa):
     """The removed per_molecule keyword and unknown bodies are rejected."""
-    assert SASA(gsh_aa, ndots=240, bodies='selection').molecule_labels == ['selection']
+    assert SASA(gsh_aa, ndots=240, bodies='selection').body_labels == ['selection']
     with pytest.raises(TypeError, match='per_molecule'):
         SASA(gsh_aa, per_molecule=False)
     with pytest.raises(ValueError, match='bodies must be one of'):
