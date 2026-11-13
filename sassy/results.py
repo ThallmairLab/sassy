@@ -11,6 +11,7 @@ from numpy.typing import ArrayLike
 import MDAnalysis as mda
 
 from .groups import body_type_indices
+from .statistics import resolve_statistic
 
 COLUMNS = ('bodies', 'total', 'types', 'atoms') # the levels of Results.table
 
@@ -55,6 +56,8 @@ class Results:
 		radius 0 have SASA 0; None if not kept (``keep_atoms=False``)
 	atom_labels : list of str or None
 		(n_atoms,) label of every atom, ``<resname><resid>:<name>``
+	atom_body : np.ndarray or None
+		(n_atoms,) body index of every atom
 	ag : MDAnalysis.AtomGroup or None
 		the atoms, for :meth:`select` by selection string or AtomGroup; None after
 		:func:`load` without a universe
@@ -66,8 +69,9 @@ class Results:
 	>>> res.body_sasa, res.body_labels # (n_bodies, n_frames), ['GSH1', 'GSH2', ...]
 	>>> res.body('GSH2')               # (n_frames,)
 	>>> res.type_sasa()                # {'GSH': (n_frames,), ...}
-	>>> res.select('name S*')     # (n_frames,) summed over the selected atoms
-	>>> res.table(['bodies', 'total'])  # labels and (n_columns, n_frames) values
+	>>> res.select('name S*')          # (n_frames,) summed over the selected atoms
+	>>> res.table(['bodies', 'total']) # labels and (n_columns, n_frames) values
+	>>> res.representative('GSH')      # (body, frame, median SASA) of a median GSH
 	"""
 	times: np.ndarray
 	frames: np.ndarray
@@ -76,6 +80,7 @@ class Results:
 	body_type_labels: list[str]
 	atom_sasa: np.ndarray | None = None
 	atom_labels: list[str] | None = None
+	atom_body: np.ndarray | None = None
 	ag: mda.AtomGroup | None = field(default=None, compare=False)
 
 	def __post_init__(self) -> None:
@@ -87,6 +92,8 @@ class Results:
 			self.atom_sasa = np.asarray(self.atom_sasa, dtype=float).reshape(-1, len(self.frames))
 		if self.atom_labels is not None:
 			self.atom_labels = list(self.atom_labels)
+		if self.atom_body is not None:
+			self.atom_body = np.asarray(self.atom_body, dtype=int)
 
 	def __repr__(self) -> str:
 		types = ', '.join(f"{name} x{len(indices)}" for name, indices in self.body_type_indices.items())
@@ -139,17 +146,18 @@ class Results:
 		return {name: self.body_sasa[indices] if per_body else self.body_sasa[indices].sum(axis=0)
 		        for name, indices in self.body_type_indices.items()}
 
-	def representative(self, body_type: str, statistic: str | Callable[[np.ndarray], float] | float = 'median',
-	                   frame: int | None = None) -> tuple[int, int, float]:
+	def representative(self, body_type: str | None = None,
+	                   statistic: str | Callable[[np.ndarray], float] | float = 'median', frame: int | None = None,
+	                   body: int | str | None = None) -> tuple[int, int, float]:
 		"""
-		A representative body of a type and frame: the statistic is taken over the SASA
-		distribution of that type only (all its bodies in all analysed frames), and the
-		(body, frame) whose SASA is closest to it is chosen.
+		A representative body and frame: the statistic is taken over the SASA distribution of
+		a body type only (all its bodies in all analysed frames), and the (body, frame) whose
+		SASA is closest to it is chosen.
 
 		Parameters
 		----------
-		body_type : str
-			type (see :attr:`body_type_indices`)
+		body_type : str, optional
+			type (see :attr:`body_type_indices`); or give ``body``
 		statistic : str, callable or float
 			a name in :data:`STATISTICS` ('median', 'mean', 'mode', 'q1', 'q3', 'min', 'max',
 			'mean+std', 'mean-std'), a function of the SASA values (e.g.
@@ -157,6 +165,9 @@ class Results:
 		frame : int, optional
 			fixed trajectory frame: only the body is chosen, the one closest to the statistic
 			in that frame (the first body of the type if the frame was not analysed)
+		body : int or str, optional
+			instead of ``body_type``: a fixed body (index or label); only the frame is chosen,
+			the statistic is that of the body's type
 
 		Returns
 		-------
@@ -167,21 +178,25 @@ class Results:
 		target : float
 			the statistic (nm^2) of the type's distribution
 		"""
-		from .surface import _statistic # statistics live with the surfaces they choose
+		if (body_type is None) == (body is None):
+			raise ValueError("Give either a body type or a body.")
+		if body is not None:
+			body = self.body_index(body)
+			body_type = self.body_type_labels[body]
 		indices = self.body_type_indices
 		if body_type not in indices:
 			raise KeyError(f"No body type {body_type!r}; types: {', '.join(indices)}.")
-		function, _ = _statistic(statistic)
-		bodies = indices[body_type]
-		values = self.body_sasa[bodies] # (n_bodies_of_type, n_frames)
-		target = float(function(values.ravel()))
+		function, _ = resolve_statistic(statistic)
+		target = float(function(self.body_sasa[indices[body_type]].ravel()))
+		candidates = indices[body_type] if body is None else np.array([body])
+		values = self.body_sasa[candidates] # (n_candidates, n_frames)
 		if frame is None:
 			k, column = np.unravel_index(np.argmin(np.abs(values - target)), values.shape)
-			return int(bodies[k]), int(self.frames[column]), target
+			return int(candidates[k]), int(self.frames[column]), target
 		analysed = np.flatnonzero(self.frames == frame)
 		if not len(analysed):
-			return int(bodies[0]), int(frame), target
-		return int(bodies[np.argmin(np.abs(values[:, analysed[0]] - target))]), int(frame), target
+			return int(candidates[0]), int(frame), target
+		return int(candidates[np.argmin(np.abs(values[:, analysed[0]] - target))]), int(frame), target
 
 	# atoms
 	def _atom_indices(self, selection: str | mda.AtomGroup | ArrayLike) -> np.ndarray:
@@ -279,10 +294,6 @@ class Results:
 			values.append(self.select(group))
 		return [f"{label}{suffix}" for label in labels], np.array(values).reshape(len(values), self.n_frames)
 
-	def save(self, fname: str | Path, **meta) -> None:
-		"""Save to an npz file (see :func:`save`), readable with :func:`load`."""
-		save(fname, self, meta=meta)
-
 
 def _difference(minuend: Results, subtrahend: Results) -> Results:
 	"""Element-wise ``minuend - subtrahend`` (e.g. the buried area: free minus covered)."""
@@ -290,7 +301,7 @@ def _difference(minuend: Results, subtrahend: Results) -> Results:
 	if minuend.atom_sasa is not None and subtrahend.atom_sasa is not None:
 		atoms = minuend.atom_sasa - subtrahend.atom_sasa
 	return Results(minuend.times, minuend.frames, minuend.body_sasa - subtrahend.body_sasa, minuend.body_labels,
-	               minuend.body_type_labels, atoms, minuend.atom_labels, minuend.ag)
+	               minuend.body_type_labels, atoms, minuend.atom_labels, minuend.atom_body, minuend.ag)
 
 
 @dataclass(repr=False)
@@ -322,9 +333,10 @@ def save(fname: str | Path, results: Results, free: Results | None = None, meta:
 	Save results to an npz file, readable with :func:`load` (and with ``numpy.load``).
 
 	Keys: ``times``, ``frames``, ``body_labels``, ``body_type_labels``, ``body_sasa`` (n_bodies,
-	n_frames), ``total_sasa``; with the per-atom SASA ``atom_sasa``, ``atom_labels`` and ``atom_indices`` (universe
-	indices); with ``free`` the same arrays prefixed ``free_``; ``meta`` (JSON); with a
-	``table`` (labels, values) ``columns`` and ``column_labels``.
+	n_frames), ``total_sasa``, ``atom_body`` (body of every atom); with the per-atom SASA
+	``atom_sasa``, ``atom_labels`` and ``atom_indices`` (universe indices); with ``free`` the same
+	arrays prefixed ``free_``; ``meta`` (JSON); with a ``table`` (labels, values) ``columns`` and
+	``column_labels``.
 	"""
 	arrays = {'times': results.times, 'frames': results.frames, 'body_labels': np.array(results.body_labels, dtype=str),
 	          'body_type_labels': np.array(results.body_type_labels, dtype=str)}
@@ -337,6 +349,8 @@ def save(fname: str | Path, results: Results, free: Results | None = None, meta:
 			arrays[f'{prefix}atom_sasa'] = item.atom_sasa
 	if results.atom_labels is not None:
 		arrays['atom_labels'] = np.array(results.atom_labels, dtype=str)
+	if results.atom_body is not None:
+		arrays['atom_body'] = results.atom_body
 	if results.ag is not None:
 		arrays['atom_indices'] = results.ag.indices
 	if table is not None:
@@ -376,7 +390,8 @@ def load(fname: str | Path, universe: mda.Universe | None = None) -> Saved:
 
 	def results(prefix: str) -> Results:
 		return Results(data['times'], data['frames'], data[f'{prefix}body_sasa'], data['body_labels'].tolist(),
-		               data['body_type_labels'].tolist(), data.get(f'{prefix}atom_sasa'), atom_labels, ag)
+		               data['body_type_labels'].tolist(), data.get(f'{prefix}atom_sasa'), atom_labels,
+		               data.get('atom_body'), ag)
 
 	main = results('')
 	free = results('free_') if 'free_body_sasa' in data else None

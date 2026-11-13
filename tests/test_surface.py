@@ -5,7 +5,7 @@ import MDAnalysis as mda
 from MDAnalysis.lib.transformations import rotation_matrix
 
 from sassy import SASA, Surface, best_matching_frame, closest_to, generate_surface, to_nm
-from sassy.surface import mode
+from sassy.statistics import mode
 from sassy.bin.sassy import main
 from conftest import DATA
 

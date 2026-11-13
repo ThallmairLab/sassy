@@ -112,7 +112,7 @@ def test_molecule_bodies(gsh_aa):
     together = SASA(ligands, ndots=240, environment=protein, bodies='selection')
     together.run(stop=5)
     assert np.all(together.results.total_sasa < covered.results.total_sasa)
-    assert 'covered by an environment of 36 atom(s)' in covered.describe()
+    assert 'covered by an environment of 36 atom(s)' in str(covered)
 
 
 def test_buried(complex_):

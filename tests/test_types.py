@@ -156,7 +156,7 @@ def test_surface_per_type(gsh_aa, tmp_path):
         values = sasa.results.type_sasa(per_body=True)[name]
         for statistic in ('median', 'mean', 'q3'):
             molecule, frame, target = sasa.results.representative(name, statistic)
-            from sassy.surface import STATISTICS
+            from sassy.statistics import STATISTICS
             assert target == pytest.approx(STATISTICS[statistic](values.ravel()))
             column = np.flatnonzero(sasa.results.frames == frame)[0]
             assert molecule in sasa.body_type_indices[name]

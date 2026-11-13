@@ -3,6 +3,7 @@ import numpy as np
 import pytest
 
 from sassy import COLUMNS, SASA, Results, load
+from sassy.results import save
 from test_environment import copies
 
 
@@ -82,7 +83,7 @@ def test_save_load(three, tmp_path):
         assert a.body_labels == b.body_labels and a.body_type_labels == b.body_type_labels and a.atom_labels == b.atom_labels
         assert np.array_equal(a.frames, b.frames) and np.allclose(a.times, b.times)
     assert saved.meta['selection'] == 'resid 1 2' and saved.meta['bodies'] == 'molecule'
-    assert saved.meta['ndots'] == len(sasa.unit) and saved.meta['n_environment'] == 36
+    assert saved.meta['ndots'] == len(sasa.dots) and saved.meta['n_environment'] == 36
     # by index without the universe, by selection string with it
     assert np.allclose(saved.results.select([0, 1]), sasa.results.select([0, 1]))
     with pytest.raises(ValueError, match='universe'):
@@ -95,7 +96,7 @@ def test_save_load(three, tmp_path):
     assert np.allclose(data['free_total_sasa'], sasa.free.total_sasa)
     # without atoms and without free: only the bodies
     light = SASA(three.atoms, ndots=240, keep_atoms=False)
-    light.run(stop=2).save(tmp_path / 'light.npz', note='bodies only')
+    save(tmp_path / 'light.npz', light.run(stop=2), meta={'note': 'bodies only'})
     saved = load(tmp_path / 'light.npz')
     assert saved.results.atom_sasa is None and saved.free is None and saved.buried is None
     assert saved.meta == {'note': 'bodies only'}

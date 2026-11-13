@@ -5,7 +5,7 @@ import pytest
 from sassy import unit_dots
 
 
-@pytest.mark.parametrize('ndots, expected', [(24, 32), (50, 92), (100, 122), (240, 252)])
+@pytest.mark.parametrize('ndots, expected', [(1, 12), (2, 12), (24, 32), (50, 92), (100, 122), (240, 252)])
 def test_unit_dots(ndots, expected):
     """
     The number of dots is the smallest geodesic count >= ndots and all dots lie on the unit sphere.

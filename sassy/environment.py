@@ -6,11 +6,19 @@ For every body, the environment atoms within reach are copied next to it, in its
 periodic image, so that each body is covered by the environment but not by the
 other bodies.
 """
+from typing import NamedTuple
 import numpy as np
 from numpy.typing import ArrayLike
 from MDAnalysis.lib.distances import capped_distance, minimize_vectors
 
 from .units import to_nm
+
+
+class Copies(NamedTuple):
+	"""Environment atoms copied next to the bodies, see :func:`environment_copies`."""
+	bodies: np.ndarray    # (k,) body of every copy
+	env: np.ndarray       # (k,) index of every copy in the environment
+	positions: np.ndarray # (k, 3) positions (nm), in the periodic image of their body
 
 
 def box_nm(dimensions: ArrayLike | None) -> np.ndarray | None:
@@ -28,7 +36,7 @@ def box_nm(dimensions: ArrayLike | None) -> np.ndarray | None:
 
 
 def environment_copies(xyz: ArrayLike, body: ArrayLike, env_xyz: ArrayLike, cutoff: float,
-                       box: ArrayLike | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+                       box: ArrayLike | None = None) -> Copies:
 	"""
 	The environment atoms within ``cutoff`` of every body, each in the periodic image of
 	the body (minimum image to a body atom within reach, so bodies are assumed whole).
@@ -49,18 +57,15 @@ def environment_copies(xyz: ArrayLike, body: ArrayLike, env_xyz: ArrayLike, cuto
 
 	Returns
 	-------
-	bodies : np.ndarray
-		(k,) body of every copy
-	env : np.ndarray
-		(k,) index in ``env_xyz`` of every copy; an environment atom near several bodies
-		is copied once per body
-	positions : np.ndarray
+	Copies
+		``bodies`` (k,) body of every copy, ``env`` (k,) index in ``env_xyz`` of every copy
+		(an environment atom near several bodies is copied once per body), ``positions``
 		(k, 3) positions (nm) of the copies, in the periodic image of their body
 	"""
 	xyz = np.asarray(xyz, dtype=np.float64)
 	env_xyz = np.asarray(env_xyz, dtype=np.float64)
 	body = np.asarray(body, dtype=np.int64)
-	empty = np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64), np.zeros((0, 3))
+	empty = Copies(np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64), np.zeros((0, 3)))
 	if not len(xyz) or not len(env_xyz):
 		return empty
 	pairs = np.asarray(capped_distance(xyz, env_xyz, max_cutoff=cutoff, box=box, return_distances=False),
@@ -74,4 +79,4 @@ def environment_copies(xyz: ArrayLike, body: ArrayLike, env_xyz: ArrayLike, cuto
 	positions = env_xyz[j]
 	if box is not None:
 		positions = xyz[i] + minimize_vectors(positions - xyz[i], box)
-	return body[i], j, positions
+	return Copies(body[i], j, positions)

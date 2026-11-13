@@ -40,7 +40,7 @@ def test_sasa_per_atom(gsh_aa):
     gsh_aa.universe.trajectory[7]
     _, owners, _ = surface_dots(to_nm(gsh_aa.positions), radii, ndots=240)
     ext = radii + 0.191
-    expected = np.bincount(owners, minlength=gsh_aa.n_atoms) * 4 * np.pi * ext**2 / len(sasa.unit)
+    expected = np.bincount(owners, minlength=gsh_aa.n_atoms) * 4 * np.pi * ext**2 / len(sasa.dots)
     assert np.allclose(per_atom[:, 7], expected, rtol=1e-6)
     one_by_one = SASA(gsh_aa, radii=radii, ndots=240, max_frame_atoms=1).run(start=2, step=3).atom_sasa
     assert np.allclose(one_by_one, per_atom[:, 2::3], rtol=1e-6)

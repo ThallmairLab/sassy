@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import ArrayLike
 
-from .groups import atom_label
+from .groups import body_type_indices, members
 
 logger = logging.getLogger(__name__)
 
@@ -182,10 +182,7 @@ def _type_groups(types: list[str] | None, n_series: int) -> dict[str, np.ndarray
 		return {'': np.arange(n_series)}
 	if len(types) != n_series:
 		raise ValueError(f"types must have one entry per series ({n_series}), got {len(types)}.")
-	groups = {}
-	for i, name in enumerate(types):
-		groups.setdefault(name, []).append(i)
-	return {name: np.array(indices) for name, indices in groups.items()}
+	return body_type_indices(types)
 
 
 def plot_total(times: ArrayLike, total: ArrayLike, fname: str | Path, title: str = 'Total SASA',
@@ -420,33 +417,35 @@ def plot_distribution_panels(values: ArrayLike | list[ArrayLike], fname: str | P
 	return _save(fig, fname)
 
 
-def _with_radius(sasa, body: int) -> np.ndarray:
-	"""Mask of the atoms of a body with a radius (with SASA; no dummy beads, virtual sites)."""
-	return sasa.radii[sasa._members[body]] > 0
-
-
-def _atoms(sasa) -> np.ndarray:
-	"""(n_atoms, n_frames) SASA of every atom of the last run; RuntimeError if not kept."""
-	atoms = sasa._check_run().atom_sasa
-	if atoms is None:
+def _type_atoms(results):
+	"""
+	For every body type: its name, its bodies, the (n_atoms_of_type, n_bodies_of_type)
+	positions of their atoms (the first atom of every body together, ...), and the mask of
+	the atom positions shown (those with SASA in any frame of any body of the type).
+	"""
+	if results.atom_sasa is None or results.atom_body is None:
 		raise RuntimeError("The SASA of every atom was not kept (keep_atoms=False).")
-	return atoms
+	atoms = members(results.atom_body, results.n_bodies) # positions of the atoms of every body
+	for name, bodies in results.body_type_indices.items():
+		positions = np.stack([atoms[i] for i in bodies], axis=1)
+		shown = (results.atom_sasa[positions] != 0).any(axis=(1, 2))
+		yield name, bodies, positions, shown
 
 
-def pooled_atom_sasa(sasa) -> tuple[list[str], list[np.ndarray]]:
+def pooled_atom_sasa(results) -> tuple[list[str], list[np.ndarray]]:
 	"""
 	SASA of every atom of a body type, pooled over all bodies of that type: the first
 	atom of every GSH together, the second together, ...
 
-	Molecules are of one type (:attr:`SASA.body_type_indices`) if they have the same moltype (tpr), else
-	the same atom and residue names in the same order (with ``bodies='residue'``: residues of
-	one residue type); with ``bodies='selection'`` (one body) every atom is on its own. Atoms
-	without a radius (dummy beads, virtual sites: no SASA) are left out. Needs the per-atom
-	SASA (``keep_atoms=True``) of the last :meth:`SASA.run`.
+	Bodies are of one type (:attr:`Results.body_type_indices`) if they have the same
+	moltype (tpr), else the same atom and residue names in the same order (with
+	``bodies='residue'``: residues of one residue type); with ``bodies='selection'`` (one
+	body) every atom is on its own. Atoms without SASA in any frame (e.g. dummy beads,
+	virtual sites with radius 0) are left out. Needs the per-atom SASA (``keep_atoms``).
 
 	Parameters
 	----------
-	sasa : SASA
+	results : Results
 
 	Returns
 	-------
@@ -456,49 +455,44 @@ def pooled_atom_sasa(sasa) -> tuple[list[str], list[np.ndarray]]:
 	pooled : list of np.ndarray
 		(n_bodies_of_type * n_frames,) SASA (nm^2) of every atom of every type
 	"""
-	atoms = _atoms(sasa)
 	labels, pooled = [], []
-	for name, bodies in sasa.body_type_indices.items():
-		members = np.stack([sasa._members[i] for i in bodies], axis=1) # (n_atoms, n_bodies) indices in ag
-		prefix = f"{name} " if len(sasa.body_type_indices) > 1 else ''
-		kept = _with_radius(sasa, bodies[0]) # the same for all bodies of the type
-		stacked = atoms[members[kept]] # (n_kept, n_bodies, n_frames)
-		for atom, series in zip(sasa.ag[members[kept, 0]], stacked):
-			labels.append(f"{prefix}{atom_label(atom)}")
-			pooled.append(series.ravel())
+	several = len(results.body_type_indices) > 1
+	for name, _, positions, shown in _type_atoms(results):
+		for position in positions[shown]: # (n_bodies_of_type,) positions of one atom in every body
+			labels.append(f"{name} " * several + results.atom_labels[position[0]])
+			pooled.append(results.atom_sasa[position].ravel())
 	return labels, pooled
 
 
-def atom_sasa_at(sasa, body: int, frame: int) -> dict[int, float]:
+def atom_sasa_at(results, body: int, frame: int) -> dict[int, float]:
 	"""
 	SASA of the atoms of one body in one frame, by their panel in the per-atom
 	distributions of :func:`pooled_atom_sasa` (e.g. to highlight the frame of a surface).
 
 	Parameters
 	----------
-	sasa : SASA
+	results : Results
 	body : int
 		body index (negative counts from the end)
 	frame : int
-		trajectory frame; must be one of the last :meth:`SASA.run`
+		trajectory frame; must be one of the results
 
 	Returns
 	-------
 	dict of int to float
 		panel index -> SASA (nm^2); empty if the frame was not analysed
 	"""
-	atoms = _atoms(sasa)
-	analysed = np.flatnonzero(sasa.results.frames == frame)
+	analysed = np.flatnonzero(results.frames == frame)
 	if not len(analysed):
 		return {}
-	body %= sasa.n_bodies
+	body %= results.n_bodies
 	offset = 0
-	for bodies in sasa.body_type_indices.values():
-		kept = _with_radius(sasa, bodies[0])
+	for _, bodies, positions, shown in _type_atoms(results):
 		if body in bodies:
-			values = atoms[sasa._members[body][kept], analysed[0]]
+			column = int(np.flatnonzero(bodies == body)[0])
+			values = results.atom_sasa[positions[shown, column], analysed[0]]
 			return {offset + k: float(value) for k, value in enumerate(values)}
-		offset += int(kept.sum())
+		offset += int(shown.sum())
 	raise AssertionError('unreachable: every body has a type')
 
 
@@ -515,13 +509,13 @@ def save_plots(directory: str | Path, times: ArrayLike, values: ArrayLike, label
 	times : array-like
 		(n_frames,) times (ps)
 	values : array-like
-		(n_series, n_frames) SASA (nm^2) of the molecules, residues or groups (for 'whole' the one body)
+		(n_series, n_frames) SASA (nm^2) of the molecules, residues or groups (for 'selection' the one body)
 	labels : list of str, optional
 		label of every series
 	total : array-like, optional
 		(n_frames,) total SASA (nm^2); default the sum of ``values``
 	kind : str
-		what the series are: 'molecule', 'residue', 'group', or 'whole' (one series: the
+		what the series are: 'molecule', 'residue', 'group', or 'selection' (one series: the
 		whole selection as one body)
 	atoms : list of array-like, optional
 		SASA of every atom, e.g. pooled over the molecules of its type (see
@@ -547,12 +541,12 @@ def save_plots(directory: str | Path, times: ArrayLike, values: ArrayLike, label
 
 		- ``sasa_total.png``: total SASA over time with its running mean
 		- ``sasa_time.png``: every molecule/residue/group over time (more than one series, or groups)
-		- ``sasa_distribution.png``: distribution of the series (of the total for 'whole')
+		- ``sasa_distribution.png``: distribution of the series (of the total for 'selection')
 		- ``sasa_distribution_per_<kind>.png``: one panel per molecule/residue/group (more than one)
 		- ``sasa_distribution_per_atom.png``: one panel per atom (with ``atoms``)
 	"""
-	if kind not in ('molecule', 'residue', 'group', 'whole'):
-		raise ValueError(f"kind must be 'molecule', 'residue', 'group' or 'whole', got {kind!r}.")
+	if kind not in ('molecule', 'residue', 'group', 'selection'):
+		raise ValueError(f"kind must be 'molecule', 'residue', 'group' or 'selection', got {kind!r}.")
 	directory = Path(directory)
 	directory.mkdir(parents=True, exist_ok=True)
 	values = np.atleast_2d(np.asarray(values, dtype=float))
@@ -568,8 +562,8 @@ def save_plots(directory: str | Path, times: ArrayLike, values: ArrayLike, label
 		return marks
 
 	files = [plot_total(times, total, directory / 'sasa_total.png',
-	                    title='SASA of the selection' if kind == 'whole' else 'Total SASA', highlight=highlight)]
-	if kind == 'whole':
+	                    title='SASA of the selection' if kind == 'selection' else 'Total SASA', highlight=highlight)]
+	if kind == 'selection':
 		files.append(plot_distribution(total, directory / 'sasa_distribution.png', ['the selection'],
 		                               highlight=highlight))
 	else:

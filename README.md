@@ -106,9 +106,11 @@ saved.results.select([0, 1, 2])     # atoms by index; by selection string with l
 ### Surface dots
 
 The structure of one frame and its solvent accessible surface dots (a Connolly-style
-dot surface) can be written as a PDB file for viewing: atoms as
-ATOM records, dots as HETATM records named `DOT` with the residue
-name and id of the atom they belong to (select them e.g. with `name DOT`).
+dot surface) can be written for viewing, as PDB or GRO (by the file extension; `-surface-ext`
+on the command line): dots are named `DOT` and carry the residue name and id of the atom they
+belong to (select them e.g. with `name DOT`). In PDB, atoms are ATOM and dots HETATM records,
+and the B-factor of an atom and of its dots is the atom's SASA (nm²), to colour by exposure.
+PDB numbers at most 99,999 records (a warning is given above it); use GRO for larger surfaces.
 
 The command line writes one surface per body type, of a representative
 body and frame of that type: statistics are taken over the SASA distribution of the
@@ -122,14 +124,14 @@ atoms; one type or `-surface-body`), superposed onto it.
 ```python
 sasa = SASA(u.select_atoms("moltype GSH"))
 sasa.run()
-sasa.write_surface("GSH_sasa.pdb", body_type="GSH")      # representative GSH and frame
-sasa.write_surface("dots.pdb", statistic="mean+std")           # frame closest to mean + std
+sasa.surface(body_type="GSH").write("GSH_sasa.pdb")        # representative GSH and frame
+sasa.surface(statistic="mean+std").write("dots.gro")        # frame closest to mean + std, as GRO
 ```
 
 ```bash
 sassy -s topol.tpr -f traj.xtc -select "moltype GSH or moltype SOL" -surface surfaces  					  # surfaces/GSH_sasa.pdb, surfaces/SOL_sasa.pdb
 sassy -s topol.tpr -f traj.xtc -select "moltype GSH" -surface -surface-body GSH1 -surface-stat mean   # ./GSH1_sasa.pdb
-sassy -s cg.tpr -f cg.xtc -select "moltype GSH" -cg -surface cg -surface-ref mapped.pdb					  # clodest to reference structure
+sassy -s cg.tpr -f cg.xtc -select "moltype GSH" -cg -surface cg -surface-ref mapped.pdb					  # closest to reference structure
 ```
 
 Surfaces use fewer dots (`ndots` / `-surface-ndots`, default 240) than the SASA. With an

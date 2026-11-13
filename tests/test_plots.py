@@ -35,7 +35,7 @@ def test_save_plots_kinds(tmp_path):
     times, values = series(2)
     assert {f.name for f in save_plots(tmp_path, times, values, ['name S*', 'name C*'], kind='group')} == {
         'sasa_total.png', 'sasa_time.png', 'sasa_distribution.png', 'sasa_distribution_per_group.png'}
-    assert {f.name for f in save_plots(tmp_path / 'w', times, values[:1], kind='whole')} == {
+    assert {f.name for f in save_plots(tmp_path / 'w', times, values[:1], kind='selection')} == {
         'sasa_total.png', 'sasa_distribution.png'}
     # atoms: an extra panel plot, series of different lengths (pooled over molecules)
     atoms = [np.concatenate([values[0], values[1]]), values[0]]
@@ -89,38 +89,42 @@ def test_pooled_atom_sasa(gsh_aa):
     sasa = SASA(three.atoms, ndots=240)
     per_atom = sasa.run(step=4).atom_sasa
     n, n_frames = gsh_aa.n_atoms, len(sasa.results.frames)
-    labels, pooled = pooled_atom_sasa(sasa)
-    assert len(labels) == len(pooled) == 2 * n # GSH (2 molecules), GSX (1)
-    assert labels[0] == f"GSH {gsh_aa[0].resname}{gsh_aa[0].resid}:{gsh_aa[0].name}"
-    assert labels[n].startswith('GSX ')
-    assert len(pooled[0]) == 2 * n_frames and len(pooled[n]) == n_frames
-    assert np.array_equal(pooled[5], np.concatenate([per_atom[5], per_atom[n + 5]]))
-    assert np.array_equal(pooled[n + 5], per_atom[2 * n + 5])
+    labels, pooled = pooled_atom_sasa(sasa.results)
+    # an atom position has a panel if it has SASA in any frame of any body of its type
+    gsh = [i for i in range(n) if (per_atom[[i, n + i]] != 0).any()]
+    gsx = [i for i in range(n) if (per_atom[2 * n + i] != 0).any()]
+    assert len(gsh) < n # fully buried atoms (no SASA) have no panel
+    assert len(labels) == len(pooled) == len(gsh) + len(gsx) # GSH (2 molecules), GSX (1)
+    assert labels[0] == f"GSH {gsh_aa[gsh[0]].resname}{gsh_aa[gsh[0]].resid}:{gsh_aa[gsh[0]].name}"
+    assert labels[len(gsh)].startswith('GSX ')
+    assert len(pooled[0]) == 2 * n_frames and len(pooled[len(gsh)]) == n_frames
+    assert np.array_equal(pooled[5], np.concatenate([per_atom[gsh[5]], per_atom[n + gsh[5]]]))
+    assert np.array_equal(pooled[len(gsh) + 5], per_atom[2 * n + gsx[5]])
     # one type: no prefix
     single = SASA(gsh_aa, ndots=240)
     single.run(stop=2)
-    assert pooled_atom_sasa(single)[0][0] == f"{gsh_aa[0].resname}{gsh_aa[0].resid}:{gsh_aa[0].name}"
+    assert pooled_atom_sasa(single.results)[0][0] == f"{gsh_aa[0].resname}{gsh_aa[0].resid}:{gsh_aa[0].name}"
     # atoms without a radius (no SASA) are left out
     radii = sasa.radii.copy()
     radii[[0, n + 0, 2 * n + 3]] = 0 # first atom of both GSH, fourth of GSX
     dummy = SASA(three.atoms, ndots=240, radii=radii)
     dummy.run(stop=2)
-    labels, pooled = pooled_atom_sasa(dummy)
-    assert len(labels) == 2 * n - 2
+    labels, pooled = pooled_atom_sasa(dummy.results)
+    assert len(labels) < len(gsh) + len(gsx) # the atoms without a radius are left out too
     assert not any(label.endswith(f":{gsh_aa[0].name}") and label.startswith('GSH') for label in labels)
     assert f"GSX {gsh_aa[3].resname}{gsh_aa[3].resid}:{gsh_aa[3].name}" not in labels
     # the atoms of one molecule in one frame, by their panel
     frame = int(dummy.results.frames[1])
-    for molecule, offset in ((0, 0), (1, 0), (2, n - 1)): # GSH panels first (n - 1 with a radius)
-        panels = atom_sasa_at(dummy, molecule, frame)
-        kept = np.flatnonzero(dummy.radii[molecule * n:(molecule + 1) * n] > 0)
-        assert sorted(panels) == list(range(offset, offset + len(kept)))
-        per_atom = dummy.results.select(dummy.body_atoms(molecule), per_atom=True)[kept, 1]
-        assert [panels[offset + k] for k in range(len(kept))] == pytest.approx(per_atom)
-        # the value lies in the pooled series of its panel
-        assert all(np.any(pooled[p] == v) for p, v in panels.items())
-    assert atom_sasa_at(dummy, -1, frame) == atom_sasa_at(dummy, 2, frame)
-    assert atom_sasa_at(dummy, 0, 10 ** 6) == {} # not analysed
+    atoms = dummy.results.atom_sasa
+    shown = {'GSH': [i for i in range(n) if (atoms[[i, n + i]] != 0).any()],
+             'GSX': [i for i in range(n) if (atoms[2 * n + i] != 0).any()]}
+    for molecule, name, offset in ((0, 'GSH', 0), (1, 'GSH', 0), (2, 'GSX', len(shown['GSH']))):
+        panels = atom_sasa_at(dummy.results, molecule, frame)
+        assert sorted(panels) == list(range(offset, offset + len(shown[name])))
+        expected = atoms[[molecule * n + i for i in shown[name]], 1]
+        assert np.allclose([panels[offset + k] for k in range(len(shown[name]))], expected)
+    assert atom_sasa_at(dummy.results, -1, frame) == atom_sasa_at(dummy.results, 2, frame)
+    assert atom_sasa_at(dummy.results, 0, 10 ** 6) == {} # not analysed
 
 
 def test_distribution():

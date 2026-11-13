@@ -3,7 +3,6 @@ Dot representation of the solvent accessible surface (Connolly-style dot
 surface), for visual inspection and for comparing
 atomistic, mapped and coarse-grained structures.
 """
-from collections.abc import Callable
 from dataclasses import dataclass
 import logging
 from pathlib import Path
@@ -12,7 +11,6 @@ import numpy as np
 from numpy.typing import ArrayLike
 import MDAnalysis as mda
 from MDAnalysis.analysis.align import rotation_matrix
-from scipy.stats import gaussian_kde
 
 from .dots import unit_dots
 from .engine import _surface_dots, warn_coincident
@@ -227,69 +225,46 @@ def generate_surface(atoms: mda.AtomGroup, radii: ArrayLike | None = None, probe
 	               environment_positions=env_positions)
 
 
+def body_remark(atoms: mda.AtomGroup, bodies: str, body: int, n_bodies: int, n_environment: int | None = None) -> str:
+	"""
+	REMARK naming the atoms of a surface: which body (of how many, see ``bodies`` of
+	:class:`SASA`), or the whole selection; and the environment covering it, if any.
+	"""
+	name = atoms.moltypes[0] if hasattr(atoms, 'moltypes') else (
+	       '/'.join(dict.fromkeys(atoms.resnames)) if hasattr(atoms, 'resnames') else 'molecule')
+	resids = atoms.resids if hasattr(atoms, 'resids') else atoms.resindices + 1
+	residues = f"resid {resids.min()}" if resids.min() == resids.max() else f"resids {resids.min()}-{resids.max()}"
+	described = f"{name}, {residues}, {atoms.n_atoms} atoms"
+	if bodies == 'selection':
+		text = f"Whole selection as one body ({described})"
+	else:
+		text = f"{bodies.capitalize()} {body % n_bodies} of {n_bodies} ({described}), on its own"
+	if n_environment is not None:
+		text += f"; covered by an environment of {n_environment} atoms"
+	return text
+
+def chosen_remark(results, bodies: str, body: int, frame: int, target: float, statistic: str,
+                  body_choice: bool = False) -> str:
+	"""
+	REMARK on how the frame (and with ``body_choice`` the body) of a surface was chosen from
+	the :class:`Results`: the SASA closest to the ``statistic`` (``target``, nm^2) of the
+	body's type; also logged.
+	"""
+	label, body_type = results.body_labels[body], results.body_type_labels[body]
+	analysed = np.flatnonzero(results.frames == frame)
+	sasa = f"{results.body_sasa[body, analysed[0]]:.3f} nm^2" if len(analysed) else "not analysed"
+	pool = (f"{results.n_frames} analysed frame(s)" if bodies == 'selection' else
+	        f"{len(results.body_type_indices[body_type])} {body_type} {bodies}(s) x {results.n_frames} "
+	        f"analysed frame(s)")
+	what = f"Representative {bodies} and frame: {label} in frame {frame}" if body_choice else "Representative frame"
+	logger.info("%s %s in frame %d: SASA %s, closest to the %s (%.3f nm^2) of %s",
+	            'representative' if body_choice else 'surface of', label, frame, sasa, statistic, target, pool)
+	return f"{what}: SASA ({sasa}) closest to the {statistic} ({target:.3f} nm^2) of {pool}"
+
+
 def _version() -> str:
 	from . import __version__ # not at import time: the package imports this module
 	return __version__
-
-
-def mode(values: ArrayLike, n_grid: int = 1024) -> float:
-	"""
-	Most probable value: the maximum of a Gaussian kernel density estimate of the values
-	(Scott's bandwidth), on a grid of ``n_grid`` points from their minimum to maximum.
-	For bimodal distributions this is the higher peak, where mean and median may fall
-	between the peaks. With fewer than two distinct values, the median.
-	"""
-	values = np.asarray(values, dtype=float)
-	if len(np.unique(values)) < 2:
-		return float(np.median(values))
-	grid = np.linspace(values.min(), values.max(), n_grid)
-	return float(grid[np.argmax(gaussian_kde(values)(grid))])
-
-
-# statistics of a SASA series by name, for choosing a representative frame
-STATISTICS: dict[str, Callable[[np.ndarray], float]] = {
-	'median': np.median,
-	'mean': np.mean,
-	'mode': mode,
-	'q1': lambda values: np.percentile(values, 25),
-	'q3': lambda values: np.percentile(values, 75),
-	'min': np.min,
-	'max': np.max,
-	'mean+std': lambda values: np.mean(values) + np.std(values),
-	'mean-std': lambda values: np.mean(values) - np.std(values),
-}
-
-
-def _statistic(statistic: str | Callable[[np.ndarray], float] | float) -> tuple[Callable[[np.ndarray], float], str]:
-	"""A statistic (name, function or fixed value) as a function of the values, and its name."""
-	if isinstance(statistic, str):
-		if statistic not in STATISTICS:
-			raise ValueError(f"Unknown statistic {statistic!r}; known: {', '.join(STATISTICS)}, "
-			                 f"or give a function or a value.")
-		return STATISTICS[statistic], statistic
-	if callable(statistic):
-		name = getattr(statistic, '__name__', '')
-		return statistic, name if name and name != '<lambda>' else 'custom statistic'
-	value = float(statistic)
-	return (lambda values: value), f"value {value:g}"
-
-
-def closest_to(values: ArrayLike, statistic: str | Callable[[np.ndarray], float] | float = 'median') -> int:
-	"""
-	Index of the value closest to a statistic of the values, i.e. a representative frame.
-
-	Parameters
-	----------
-	values : array-like
-		(n,) values, e.g. the SASA of every frame
-	statistic : str, callable or float
-		name in :data:`STATISTICS` ('median', 'mean', 'mode', 'q1', 'q3', 'min', 'max',
-		'mean+std', 'mean-std'),
-		a function of the values (e.g. ``lambda v: np.percentile(v, 90)``), or a fixed value
-	"""
-	values = np.asarray(values)
-	function, _ = _statistic(statistic)
-	return int(np.argmin(np.abs(values - function(values))))
 
 
 def best_matching_frame(positions: ArrayLike, reference: ArrayLike) -> tuple[int, np.ndarray, float]:

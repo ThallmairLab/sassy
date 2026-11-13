@@ -21,7 +21,8 @@ from sassy.results import COLUMNS
 from sassy.groups import BODIES
 from sassy.results import body_index
 from sassy.sasa import N_DOTS, SASA
-from sassy.surface import STATISTICS, SURFACE_DOTS
+from sassy.statistics import STATISTICS
+from sassy.surface import SURFACE_DOTS
 
 logger = logging.getLogger('sassy')
 
@@ -287,7 +288,7 @@ def _highlight(sasa: SASA, args: argparse.Namespace, surface):
 		return Highlight(time=surface.time, label=label)
 	return Highlight(time=surface.time, sasa=float(sasa.results.body_sasa[series, analysed[0]]),
 	                 series=series, label=label,
-	                 atoms=atom_sasa_at(sasa, series, surface.frame) if 'atoms' in _levels(args) else None)
+	                 atoms=atom_sasa_at(sasa.results, series, surface.frame) if 'atoms' in _levels(args) else None)
 
 
 def _write_xvg(path: Path, times: np.ndarray, columns: np.ndarray, labels: list[str], command: str) -> None:
@@ -364,7 +365,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 	surface = _surface_options(args, sasa) if args.surface else None
 	if surface is False:
 		return 1
-	logger.info("%d atoms in %s, %d frame(s)", ag.n_atoms, sasa.describe(),
+	logger.info("%d atoms in %s, %d frame(s)", ag.n_atoms, sasa,
 	            len(universe.trajectory[args.start:args.stop:args.step]))
 	results = sasa.run(start=args.start, stop=args.stop, step=args.step, verbose=not args.quiet)
 
@@ -397,9 +398,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 			kind = 'group'
 			series_labels, values = results.table((), args.group)
 		else:
-			kind = {'molecule': 'molecule', 'residue': 'residue', 'selection': 'whole'}[sasa.bodies]
+			kind = sasa.bodies
 			series_labels, values = results.body_labels, results.body_sasa
-		atom_labels, atoms = pooled_atom_sasa(sasa) if 'atoms' in _levels(args) else (None, None)
+		atom_labels, atoms = pooled_atom_sasa(results) if 'atoms' in _levels(args) else (None, None)
 		save_plots(args.plots, results.times, values, series_labels, total=results.total_sasa, kind=kind,
 		           atoms=atoms, atom_labels=atom_labels, highlight=highlights,
 		           types=results.body_type_labels if kind in ('molecule', 'residue') else None)
