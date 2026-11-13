@@ -1,9 +1,10 @@
 """
-SASA of every molecule, or of every atom, of an MDAnalysis AtomGroup over a
-trajectory.
+SASA of every body (molecule, residue, or the whole selection) and of every atom of an
+MDAnalysis AtomGroup over a trajectory, optionally covered by an environment.
 """
 from collections.abc import Callable, Iterator, Mapping
 import logging
+from pathlib import Path
 import time
 import numpy as np
 from numpy.typing import ArrayLike
@@ -12,10 +13,13 @@ from MDAnalysis.lib.log import ProgressBar
 
 from .dots import unit_dots
 from .engine import _exposed_counts, warn_coincident
-from .groups import atom_label, molecule_index, molecule_labels, molecule_members, molecule_types
-from .radii import PROBE_RADIUS, atom_radii
+from .environment import Copies, box_nm, environment_copies
+from .groups import BODIES, Bodies, atom_label, body_type_indices, members, partition
+from .radii import PROBE_RADIUS, atom_radii, radii_remarks, resolve_radii
+from .results import Results, _difference, body_index, save
+from .statistics import resolve_statistic
+from .surface import SURFACE_DOTS, Surface, body_remark, chosen_remark, generate_surface
 from .units import to_nm
-from .surface import SURFACE_DOTS, Surface, _statistic, generate_surface
 
 logger = logging.getLogger(__name__)
 
@@ -24,17 +28,26 @@ N_DOTS = 4800 # default minimum number of dots per atom (-> 4842 dots)
 
 class SASA:
 	"""
-	Solvent accessible surface area of every molecule in an MDAnalysis
-	AtomGroup (Shrake-Rupley), optionally per atom.
+	Solvent accessible surface area of every body of an MDAnalysis AtomGroup
+	(Shrake-Rupley) over a trajectory, and of every atom.
 
 	"Atom" means every particle of the AtomGroup, as in MDAnalysis: an atom in
 	atomistic systems, a coarse-grained bead with ``cg=True``.
 
-	Every molecule (by molnum, or without molnums by detecting consecutive copies,
-	see :func:`molecule_index`) is taken on its own, so other molecules do not
-	bury its surface. With ``per_molecule=False`` the whole AtomGroup is taken as
-	one body instead: all its atoms bury each other. Atoms with radius 0 (dummy beads, virtual sites) are
-	ignored. Molecules are assumed to be whole.
+	Two independent settings decide which atoms bury the surface of an atom:
+
+	- ``bodies``: the AtomGroup is split into bodies, and only atoms of the same body
+	  bury each other. By default every molecule is a body; 'residue' makes every residue a
+	  body, 'selection' the whole AtomGroup (all its atoms bury each other).
+	- ``environment``: atoms outside the AtomGroup (e.g. a protein around a ligand)
+	  that bury every body, but whose own SASA is not computed. Every body is covered
+	  by the environment, not by the other bodies (unless they are one body).
+
+	Atoms with radius 0 (dummy beads, virtual sites) are ignored. Bodies are assumed
+	to be whole.
+
+	:meth:`run` returns the :class:`Results` (also :attr:`results`): the SASA of every
+	body, in total, by type, of every atom and of any selection of atoms.
 
 	Parameters
 	----------
@@ -52,200 +65,178 @@ class SASA:
 		adds to or replaces the default radii, e.g. ``{'Na': 0.227}``
 	max_frame_atoms : int
 		number of atoms (summed over frames) computed together in one parallel call
-	per_molecule : bool
-		overlap mode: True ("molecule", default) takes every molecule on its own, so only
-		atoms of the same molecule bury each other; False ("whole") takes the whole
-		AtomGroup as one body, so all its atoms bury each other
-	save_atoms : bool
-		keep the SASA of every atom of every frame (:attr:`sasa`, (n_atoms, n_frames)),
-		needed for :meth:`get_sasa` of selections and ``run(per_atom=True)``. The SASA of
-		every molecule and the total are always kept; False saves the memory of the
-		per-atom array for very large systems or long trajectories
+	bodies : str
+		which atoms bury each other: 'molecule' (default, every molecule on its own),
+		'residue' (every residue on its own) or 'selection' (the whole AtomGroup as one body)
+	environment : str or MDAnalysis.AtomGroup, optional
+		atoms that bury every body without being counted (e.g. the protein around a
+		ligand): an AtomGroup of the same Universe, or a selection string applied to it;
+		must not overlap ``ag``. Its radii are the default ones (with a ``radii`` dict
+		applied; a ``radii`` array covers ``ag`` only); atoms with radius 0 are ignored
+	keep_atoms : bool
+		keep the SASA of every atom of every frame (``results.atom_sasa``, (n_atoms, n_frames)),
+		needed for :meth:`Results.select`. The SASA of every body is always kept; False
+		saves the memory of the per-atom array for very large systems or long trajectories
+	buried : bool
+		also compute the SASA without the environment (:attr:`free`), and so the area the
+		environment buries (:attr:`buried`); needs an ``environment``
 
 	Examples
 	--------
 	>>> sasa = SASA(universe.select_atoms('moltype GSH'))
-	>>> series = sasa.run()  # (n_molecules, n_frames), nm^2
-	>>> per_atom = sasa.run(per_atom=True)  # (n_atoms, n_frames), nm^2
-	>>> sasa.get_sasa('name S*')  # (n_frames,) SASA of the selection over time
-	>>> sasa.get_molecule_sasa(3)  # (n_frames,) SASA of molecule 3 over time
-	>>> sasa.write_surface('dots.pdb', molecule=0)  # structure + surface dots of a median-SASA frame
-	>>> sasa.write_surface('dots.pdb', statistic='mean+std')  # frame closest to mean + std of the SASA
+	>>> res = sasa.run()                # Results, also sasa.results
+	>>> res.body_sasa, res.body_labels  # (n_bodies, n_frames) nm^2, ['GSH1', 'GSH2', ...]
+	>>> res.total_sasa                  # (n_frames,)
+	>>> res.select('name S*')           # (n_frames,) SASA of the sulfur atoms
+	>>> sasa.surface('GSH1').write('dots.pdb')  # structure + surface dots of a median-SASA frame
+	>>> ligand = SASA(universe.select_atoms('resname LIG'), environment='protein', buried=True)
+	>>> ligand.run().total_sasa         # SASA of the ligand left uncovered by the protein
+	>>> ligand.buried.total_sasa        # area of the ligand buried by the protein
+	>>> ligand.save('ligand.npz')       # all of it, see load()
 
 	Attributes
 	----------
-	sasa : np.ndarray
-		(n_atoms, n_frames) SASA (nm^2) of every atom of ``ag`` from the last :meth:`run`,
-		atoms in the order of ``ag``; None before a run and with ``save_atoms=False``
-	molecule_types : list of str
-		(n_molecules,) type of every molecule: its moltype (tpr), else named by its first
-		residue (see :func:`molecule_types`); 'selection' without ``per_molecule``
-	molecule_labels : list of str
-		(n_molecules,) label of every molecule: its type numbered within the type (GSH1,
-		GSH2, SOL1, ...); 'selection' without ``per_molecule``
-	types : dict of str to np.ndarray
-		molecule indices of every type, in the order of first appearance
-	molecule_sasa : np.ndarray
-		(n_molecules, n_frames) SASA (nm^2) of every molecule from the last :meth:`run`
-	total_sasa : np.ndarray
-		(n_frames,) total SASA (nm^2) of ``ag`` from the last :meth:`run`
-	frames, times : np.ndarray
-		(n_frames,) frame numbers and times (ps) of the last :meth:`run`
+	bodies : str
+		how the AtomGroup is split into bodies ('molecule', 'residue' or 'selection')
+	n_bodies : int
+		number of bodies
+	body_labels : list of str
+		(n_bodies,) label of every body: its type numbered within the type (GSH1, GSH2,
+		SOL1, ...); ``<resname><resid>`` (ALA12) with ``bodies='residue'``; 'selection'
+		with ``bodies='selection'``
+	body_type_labels : list of str
+		(n_bodies,) type of every body: its moltype (tpr), else named by its first residue
+		(see :func:`molecule_types`); the residue type (see :func:`residue_types`) with
+		``bodies='residue'``; 'selection' with ``bodies='selection'``
+	body_type_indices : dict of str to np.ndarray
+		body indices of every type, in the order of first appearance
+	environment : MDAnalysis.AtomGroup or None
+		the environment atoms with a radius, None without an environment
+	radii : np.ndarray
+		(n_atoms,) van der Waals radii (nm) of the atoms of ``ag``
+	dots : np.ndarray
+		(n_dots, 3) dots on the unit sphere, scaled onto every atom
+	results : Results or None
+		of the last :meth:`run`: the SASA (with an environment: the part it leaves uncovered)
+	free, buried : Results or None
+		of the last :meth:`run` with ``buried``: the SASA without the environment, and the
+		area the environment buries (free minus results); None otherwise
 	"""
+
+	# --- setup
 	def __init__(self, ag: mda.AtomGroup, cg: bool = False, probe: float = PROBE_RADIUS, ndots: int = N_DOTS,
 	             radii: ArrayLike | Mapping[str, float] | None = None, max_frame_atoms: int = 20000,
-	             per_molecule: bool = True, save_atoms: bool = True) -> None:
-
+	             bodies: Bodies = 'molecule', environment: str | mda.AtomGroup | None = None,
+	             keep_atoms: bool = True, buried: bool = False) -> None:
+		if bodies not in BODIES:
+			raise ValueError(f"bodies must be one of {', '.join(BODIES)}, got {bodies!r}.")
 		if not probe >= 0:
 			raise ValueError(f"The probe radius must be >= 0 (nm), got {probe}.")
-		# prepare radii
+		if buried and environment is None:
+			raise ValueError("buried needs an environment: the area buried by the environment.")
+		self.ag, self.cg, self.probe, self.bodies, self.keep_atoms = ag, cg, probe, bodies, keep_atoms
+		self._compute_free = buried # also without the environment, see run()
 		self._custom_radii = radii is not None # for the remarks of written surfaces
-		if radii is None or isinstance(radii, Mapping):
-			radii = atom_radii(ag, cg=cg, table=radii)
+		self.radii, radii_table = resolve_radii(ag, radii, cg)
+		self.dots = unit_dots(int(ndots))
+		self._prepare_bodies()
+		self.environment = None
+		if environment is not None:
+			self._set_environment(environment, radii_table)
+		self._max_frame_atoms = max_frame_atoms
+		self._frames_per_block = max(1, max_frame_atoms // max(1, len(self._active)))
+		self.results = self.free = self.buried = None # of run()
+		logger.debug("%d atoms (%d with a radius) in %s; %d dots per atom, probe %.3f nm; %d frame(s) per "
+		             "parallel call", ag.n_atoms, len(self._active), self, len(self.dots), probe, self._frames_per_block)
+
+	def _prepare_bodies(self) -> None:
+		"""Split ``ag`` into bodies, and the arrays of its atoms with a radius (the active atoms)."""
+		ag = self.ag
+		self._body_of_atom, self.body_type_labels, self.body_labels = partition(ag, self.bodies)
+		self._members = members(self._body_of_atom, self.n_bodies) # positions in ag of the atoms of every body
+		self._ag_position = np.full(ag.universe.atoms.n_atoms, -1, dtype=np.int64) # universe index -> position in ag
+		self._ag_position[ag.indices] = np.arange(ag.n_atoms)
+
+		# the active atoms: with a radius; atoms with radius 0 neither get nor bury dots
+		active = np.flatnonzero(self.radii > 0)
+		self._active = active # positions in ag
+		self._active_universe = ag.indices[active] # universe indices
+		self._active_body = self._body_of_atom[active]
+		self._active_ext = self.radii[active] + self.probe # expanded radii (nm)
+		self._dot_area = 4 * np.pi * self._active_ext**2 / len(self.dots) # nm^2 per dot
+		# every body is placed relative to its first active atom (see _atom_areas)
+		_, first = np.unique(self._active_body, return_index=True)
+		self._body_anchor = np.zeros(self.n_bodies, dtype=int) # (n_bodies,) position in the active atoms
+		self._body_anchor[self._active_body[first]] = first
+		self._active_anchor = self._body_anchor[self._active_body]
+
+	def _set_environment(self, environment: str | mda.AtomGroup, radii_table: Mapping[str, float] | None) -> None:
+		"""Check the environment and keep its atoms with a radius, their expanded radii and the cutoff."""
+		universe = self.ag.universe
+		if isinstance(environment, str):
+			environment = universe.select_atoms(environment)
+		elif hasattr(environment, 'atoms'):
+			environment = environment.atoms
 		else:
-			radii = np.asarray(radii, dtype=float)
-			if radii.shape != (ag.n_atoms,):
-				raise ValueError(f"radii must have one value per atom ({ag.n_atoms}), got shape {radii.shape}.")
-
-		self.cg = cg
-		self.probe = probe
-		self.per_molecule = per_molecule
-		self.save_atoms = save_atoms
-
-		# prepare atoms/molecules
-		self.ag = ag
-		self.radii = radii # (n_atoms,) van der Waals radii (nm)
-		# molecule index of atoms; one molecule for the whole AtomGroup without per_molecule
-		molecules = molecule_index(ag) if per_molecule else np.zeros(ag.n_atoms, dtype=int)
-		self.n_molecules = int(molecules.max()) + 1 if len(molecules) else 0
-		self._molecule_of_atom = molecules
-		self._members = molecule_members(molecules, self.n_molecules) # indices in ag of the atoms of every molecule
-		# type and label of every molecule, and the molecules of every type (in order of appearance)
-		self.molecule_types = molecule_types(ag, molecules) if per_molecule else ['selection'] * self.n_molecules
-		self.molecule_labels = molecule_labels(self.molecule_types) if per_molecule else self.molecule_types[:]
-		self.types = {}
-		for i, name in enumerate(self.molecule_types):
-			self.types.setdefault(name, []).append(i)
-		self.types = {name: np.array(indices) for name, indices in self.types.items()}
-		active = np.flatnonzero(radii > 0) # select only atoms with a radius
-		self._active = active # indices in ag of the atoms with a radius
-		self._indices = ag.indices[active]
-		self._molecules = molecules[active]
-
-		# prepare dots
-		self.unit = unit_dots(int(ndots))
-		self._ext = radii[active] + probe # expanded radii (nm)
-		self._dot_area = 4 * np.pi * self._ext**2 / len(self.unit) # nm^2 per dot
-		
-		# every molecule is placed relative to its first atom
-		# anchor is the index of the first atom of every molecule in the active atom
-		_, first = np.unique(self._molecules, return_index=True)
-		anchor = np.zeros(self.n_molecules, dtype=int)
-		anchor[self._molecules[first]] = first
-		self._anchor = anchor[self._molecules]
-
-		# parallelization
-		self._frames_per_block = max(1, max_frame_atoms // max(1, len(active)))
-
-		# prep results of run(), see get_sasa / get_molecule_sasa
-		self._lookup = np.full(ag.universe.atoms.n_atoms, -1, dtype=np.int64) # universe index -> index in ag
-		self._lookup[ag.indices] = np.arange(ag.n_atoms)
-		self.sasa = None # (n_atoms, n_frames) SASA (nm^2) of every atom of ag, only with save_atoms
-		self.molecule_sasa = None # (n_molecules, n_frames) SASA (nm^2) of every molecule
-		self.total_sasa = None # (n_frames,) total SASA (nm^2) of ag
-		self.frames = None # (n_frames,) frame numbers
-		self.times = None # (n_frames,) times (ps)
-		logger.debug("%d atoms (%d with a radius) in %d %s; %d dots per atom, probe %.3f nm; "
-		             "%d frame(s) per parallel call", ag.n_atoms, len(active), self.n_molecules,
-		             'molecule(s)' if per_molecule else 'body (whole AtomGroup)', len(self.unit), probe,
-		             self._frames_per_block)
-
-	# SASA calculation
-	def _atom_areas(self, xyz: np.ndarray, coincident: list | None = None) -> np.ndarray:
-		"""
-		SASA (nm^2) of every atom in a block of frames.
-
-		Parameters
-		----------
-		xyz : np.ndarray
-			(n_frames, n_atoms, 3) positions (nm) of the atoms with a radius
-		coincident : list, optional
-			gets (number of frames, (n_pairs, 2) indices in ``ag``) of the atoms at an
-			identical position in this block of frames, if any
-
-		Returns
-		-------
-		np.ndarray
-			(n_frames, n_atoms)
-		"""
-		n_frames, n_atoms, _ = xyz.shape
-		
-		# put every (frame, molecule) block in its own slab along x and seperate them,
-		# so a _neighbor_list finds the neighbours of all of them and no pairs between them
-		xyz = xyz - xyz[:, self._anchor]
-		span = 2 * np.abs(xyz).max() + 2 * self._ext.max() + 0.1 # nm
-		block = (np.arange(n_frames)[:, None] * self.n_molecules + self._molecules[None]).ravel()
-		xyz = xyz.reshape(-1, 3)
-		xyz[:, 0] += block * span
-		
-		ext = np.tile(self._ext, n_frames)
-		exposed, pairs = _exposed_counts(xyz, ext, block, self.unit)
-		if coincident is not None and len(pairs):
-			coincident.append((len(np.unique(pairs[:, 0] // n_atoms)), self._active[pairs % n_atoms]))
-		return exposed.reshape(n_frames, n_atoms) * self._dot_area
-
-	def _atom_blocks(self, start: int | None, stop: int | None, step: int | None,
-	                 times: list | None = None, coincident: list | None = None) -> Iterator[np.ndarray]:
-		"""
-		Calculate the atom SASA, (n_frames, n_atoms), of blocks of frames of ``start:stop:step``;
-		the time of every frame is appended to ``times``, atoms at an identical position to
-		``coincident`` (see :meth:`_atom_areas`).
-		"""
-		trajectory = self.ag.universe.trajectory
-		current = trajectory.ts.frame
-		buffer = []
+			raise TypeError(f"environment must be a selection string or an AtomGroup, got {type(environment).__name__}.")
+		if environment.universe is not universe:
+			raise ValueError("The environment belongs to a different Universe than the AtomGroup of SASA.")
+		if not environment.n_atoms:
+			raise ValueError("The environment contains no atoms.")
+		overlap = np.intersect1d(environment.indices, self.ag.indices)
+		if len(overlap):
+			shown = ', '.join(atom_label(universe.atoms[i]) for i in overlap[:5])
+			raise ValueError(f"{len(overlap)} atom(s) are both in the AtomGroup and in the environment: {shown}"
+			                 f"{' ...' if len(overlap) > 5 else ''}; the environment must not contain them.")
 		try:
-			for ts in trajectory[start:stop:step]:
-				buffer.append(to_nm(ts.positions[self._indices])) # save positions (nm)
-				if times is not None:
-					times.append(ts.time)
-				if len(buffer) == self._frames_per_block: 
-					yield self._atom_areas(np.array(buffer), coincident) # run SASA calculation
-					buffer = []
-			if buffer:
-				yield self._atom_areas(np.array(buffer), coincident)
-		finally:
-			trajectory[current] # leave the trajectory on the frame it was on
+			radii = atom_radii(environment, cg=self.cg, table=radii_table)
+		except ValueError as error:
+			raise ValueError(f"environment: {error}") from None
+		keep = radii > 0
+		if not keep.any():
+			raise ValueError("No atom of the environment has a radius.")
+		self.environment = environment[keep]
+		self._env_radii = radii[keep] # (n_env,) van der Waals radii (nm)
+		self._env_ext = radii[keep] + self.probe # (n_env,) expanded radii (nm)
+		# an environment atom can only bury an atom within the sum of their expanded radii
+		self._env_cutoff = (self._active_ext.max() if len(self._active_ext) else 0.0) + self._env_ext.max()
+		logger.debug("environment: %d atom(s) with a radius (of %d), cutoff %.3f nm", self.environment.n_atoms,
+		             len(radii), self._env_cutoff)
 
-	
-	def _molecule_areas(self, areas: np.ndarray) -> np.ndarray:
-		"""(n_frames, n_atoms) atom SASA -> (n_frames, n_molecules) molecule SASA."""
-		n_frames = len(areas)
-		block = (np.arange(n_frames)[:, None] * self.n_molecules + self._molecules[None]).ravel()
-		return np.bincount(block, weights=areas.ravel(),
-		                   minlength=n_frames * self.n_molecules).reshape(n_frames, -1)
+	@property
+	def n_bodies(self) -> int:
+		return len(self.body_labels)
 
+	@property
+	def body_type_indices(self) -> dict[str, np.ndarray]:
+		"""Body indices of every type, in the order of first appearance: {type: indices}."""
+		return body_type_indices(self.body_type_labels)
 
+	def __str__(self) -> str:
+		"""The bodies in words, e.g. '3 molecule(s)', '12 residue(s)' or 'the whole selection as one body'."""
+		text = 'the whole selection as one body' if self.bodies == 'selection' else f"{self.n_bodies} {self.bodies}(s)"
+		if self.environment is not None:
+			text += f", covered by an environment of {self.environment.n_atoms} atom(s)"
+		return text
+
+	def __repr__(self) -> str:
+		return f"<SASA: {self.ag.n_atoms} atoms in {self}>"
+
+	# --- running
 	def run(self, start: int | None = None, stop: int | None = None, step: int | None = None,
-	        per_atom: bool = False, verbose: bool = False, name: str = "") -> np.ndarray:
+	        verbose: bool = False, name: str = "") -> Results:
 		"""
-		SASA (nm^2) of every molecule, or of every atom, in the frames ``start:stop:step``
-		of the trajectory.
+		SASA (nm^2) of every body, and with ``keep_atoms`` of every atom, in the frames
+		``start:stop:step`` of the trajectory.
 
-		The SASA of every molecule and the total are stored in :attr:`molecule_sasa`
-		and :attr:`total_sasa`, and (with ``save_atoms``) that of every atom in
-		:attr:`sasa`, with :attr:`frames` and :attr:`times`, so that afterwards the SASA
-		of any selection or molecule can be taken with :meth:`get_sasa` and
-		:meth:`get_molecule_sasa`. A new run replaces the stored results.
+		With an environment, it is the SASA left uncovered by the environment; with
+		``buried`` also without the environment (:attr:`free`) and the area the environment
+		buries (:attr:`buried`). A new run replaces the stored results.
 
 		Parameters
 		----------
 		start, stop, step : int, optional
 			frames of the trajectory, as in ``trajectory[start:stop:step]``
-		per_atom : bool
-			return the SASA of every atom instead of every molecule (needs ``save_atoms``).
-			The SASA of an atom is that within its own molecule, so the atoms of a
-			molecule sum to its SASA.
 		verbose : bool
 			show a progress bar over the frames. It advances once per block of frames
 			(see ``max_frame_atoms``), so it costs no measurable time but moves in steps.
@@ -254,275 +245,207 @@ class SASA:
 
 		Returns
 		-------
-		np.ndarray
-			(n_molecules, n_frames), molecules in the order of :func:`split_molecules`, or
-			with ``per_atom`` (n_atoms, n_frames), atoms in the order of ``ag``; atoms with
-			radius 0 have SASA 0
+		Results
 		"""
-		if per_atom and not self.save_atoms:
-			raise ValueError("per_atom needs the SASA of every atom: create the SASA with save_atoms=True.")
-		trajectory = self.ag.universe.trajectory
-		frames = np.arange(trajectory.n_frames)[start:stop:step]
-		n_frames = len(frames)
-		atom_sasa = np.zeros((self.ag.n_atoms, n_frames)) if self.save_atoms else None
-		molecule_sasa = np.zeros((self.n_molecules, n_frames))
-		times, coincident = [], []
+		frames = np.arange(self.ag.universe.trajectory.n_frames)[start:stop:step]
+		covered = self._new_arrays(len(frames))
+		free = self._new_arrays(len(frames)) if self._compute_free else None
+		times, coincident, done = [], [], 0
 		tic = time.perf_counter()
-		if len(self._indices) and n_frames: # else only atoms without radius / no frames
-			done = 0
-			with ProgressBar(total=n_frames, disable=not verbose, desc=f"SASA calculation {name}", unit="frame") as bar:
-				for areas in self._atom_blocks(start, stop, step, times, coincident):
-					block = slice(done, done + len(areas))
-					if atom_sasa is not None:
-						atom_sasa[self._active, block] = areas.T
-					molecule_sasa[:, block] = self._molecule_areas(areas).T
-					done += len(areas)
-					bar.update(len(areas))
-		else:
-			current = trajectory.ts.frame
-			times = [ts.time for ts in trajectory[start:stop:step]]
-			trajectory[current]
+		with ProgressBar(total=len(frames), disable=not verbose, desc=f"SASA calculation {name}", unit="frame") as bar:
+			for xyz, copies in self._position_blocks(start, stop, step, times):
+				block = slice(done, done + len(xyz))
+				areas, pairs = self._atom_areas(xyz, copies)
+				self._store(covered, areas, block)
+				if pairs is not None:
+					coincident.append(pairs)
+				if free is not None: # the same positions without the environment
+					self._store(free, self._atom_areas(xyz)[0], block)
+				done += len(xyz)
+				bar.update(len(xyz))
 		if coincident: # once per run, not per block of frames
+			universe = self.ag.universe
 			warn_coincident(np.concatenate([pairs for _, pairs in coincident]),
-			                label=lambda i: atom_label(self.ag[i]), frames=sum(n for n, _ in coincident))
+			                label=lambda i: atom_label(universe.atoms[i]), frames=sum(n for n, _ in coincident))
 		# results only replaced after a complete run
-		self.frames, self.times = frames, np.array(times, dtype=float)
-		self.sasa, self.molecule_sasa = atom_sasa, molecule_sasa
-		self.total_sasa = molecule_sasa.sum(axis=0)
+		self.results = self._to_results(covered, times, frames)
+		self.free = self._to_results(free, times, frames) if free is not None else None
+		self.buried = _difference(self.free, self.results) if free is not None else None
 		elapsed = time.perf_counter() - tic
-		logger.debug("SASA of %d frame(s) in %.2f s (%.1f frames/s)", n_frames, elapsed,
-		             n_frames / elapsed if elapsed > 0 else float('inf'))
-		return self.sasa if per_atom else self.molecule_sasa
+		logger.debug("SASA of %d frame(s) in %.2f s (%.1f frames/s)", len(frames), elapsed,
+		             len(frames) / elapsed if elapsed > 0 else float('inf'))
+		return self.results
 
-	# SASA retrieval
-	def _ag_indices(self, selection: str | mda.AtomGroup | None) -> np.ndarray:
-		"""Indices in ``ag`` of the atoms of a selection string (applied to ``ag``) or an AtomGroup."""
-		if selection is None:
-			return np.arange(self.ag.n_atoms)
-		if isinstance(selection, str):
-			selection = self.ag.select_atoms(selection)
-		elif isinstance(selection, mda.core.groups.Atom):
-			selection = selection.universe.atoms[[selection.index]]
-		elif hasattr(selection, 'atoms'): # AtomGroup, Residue(Group), Segment(Group)
-			selection = selection.atoms
-		else:
-			raise TypeError(f"selection must be a selection string or an AtomGroup, got {type(selection).__name__}.")
-		if selection.universe is not self.ag.universe:
-			raise ValueError("The selection belongs to a different Universe than the AtomGroup of SASA.")
-		indices = self._lookup[selection.indices]
-		if (indices < 0).any():
-			missing = selection.indices[indices < 0]
-			raise ValueError(f"{len(missing)} atom(s) of the selection are not in the AtomGroup of SASA: "
-			                 f"universe indices {missing[:10].tolist()}{' ...' if len(missing) > 10 else ''}.")
-		return indices
+	def _position_blocks(self, start: int | None, stop: int | None, step: int | None,
+	                     times: list) -> Iterator[tuple[np.ndarray, list[Copies] | None]]:
+		"""
+		Positions (nm), (n_frames, n_active, 3), of the active atoms in blocks of frames of
+		``start:stop:step``, with the environment atoms near the bodies in every frame (see
+		:func:`environment_copies`; None without an environment); the time of every frame is
+		appended to ``times``.
+		"""
+		trajectory = self.ag.universe.trajectory
+		current = trajectory.ts.frame
+		buffer, copies, n_copies = [], [], 0
+		with_environment = self.environment is not None
+		try:
+			for ts in trajectory[start:stop:step]:
+				xyz = to_nm(ts.positions[self._active_universe])
+				buffer.append(xyz)
+				times.append(ts.time)
+				if with_environment: # only the environment atoms within reach: never the whole environment
+					copies.append(environment_copies(xyz, self._active_body, to_nm(ts.positions[self.environment.indices]),
+					                                 self._env_cutoff, box_nm(ts.dimensions)))
+					n_copies += len(copies[-1].env)
+				if (len(buffer) == self._frames_per_block or
+				    n_copies and len(buffer) * len(self._active) + n_copies >= self._max_frame_atoms):
+					yield np.array(buffer).reshape(len(buffer), len(self._active), 3), copies if with_environment else None
+					buffer, copies, n_copies = [], [], 0
+			if buffer:
+				yield np.array(buffer).reshape(len(buffer), len(self._active), 3), copies if with_environment else None
+		finally:
+			trajectory[current] # leave the trajectory on the frame it was on
 
-	def _check_run(self, atoms: bool = False) -> None:
-		'''
-		Check that a SASA has been computed with SASA.run, and that the SASA of every atom is available if ``atoms``.
-		  Raises a RuntimeError otherwise.
-		'''
-		if self.frames is None:
+	def _atom_areas(self, xyz: np.ndarray, copies: list[Copies] | None = None
+	                ) -> tuple[np.ndarray, tuple[int, np.ndarray] | None]:
+		"""
+		SASA (nm^2) of every active atom in a block of frames.
+
+		Parameters
+		----------
+		xyz : np.ndarray
+			(n_frames, n_active, 3) positions (nm) of the active atoms
+		copies : list of Copies, optional
+			of every frame the environment atoms near its bodies, which bury them; None:
+			without the environment
+
+		Returns
+		-------
+		areas : np.ndarray
+			(n_frames, n_active)
+		coincident : tuple or None
+			(number of frames, (n_pairs, 2) universe indices) of the atoms at an identical
+			position, None if there are none
+		"""
+		n_frames, n_atoms, _ = xyz.shape
+		if not n_atoms:
+			return np.zeros((n_frames, 0)), None
+
+		# put every (frame, body) block in its own slab along x and seperate them,
+		# so a _neighbor_list finds the neighbours of all of them and no pairs between them
+		anchors = xyz[:, self._body_anchor] # (n_frames, n_bodies, 3) position of every body
+		xyz = (xyz - xyz[:, self._active_anchor]).reshape(-1, 3)
+		block = (np.arange(n_frames)[:, None] * self.n_bodies + self._active_body[None]).ravel()
+		ext = np.tile(self._active_ext, n_frames)
+		n_target = len(xyz)
+		target = env = None
+		if copies is not None: # every copy in the block (slab) of its body, which only it buries
+			env = np.concatenate([c.env for c in copies])
+			xyz = np.concatenate([xyz] + [c.positions - anchors[f, c.bodies] for f, c in enumerate(copies)])
+			block = np.concatenate([block] + [f * self.n_bodies + c.bodies for f, c in enumerate(copies)])
+			ext = np.concatenate([ext, self._env_ext[env]])
+			target = np.arange(len(xyz)) < n_target
+		span = 2 * np.abs(xyz).max() + 2 * ext.max() + 0.1 # nm
+		xyz[:, 0] += block * span
+
+		exposed, pairs = _exposed_counts(xyz, ext, block, self.dots, target)
+		coincident = None
+		if len(pairs):
+			indices = self._active_universe[pairs % n_atoms] # universe indices; the copies: of their environment atom
+			if env is not None:
+				copy = pairs >= n_target
+				indices[copy] = self.environment.indices[env[pairs[copy] - n_target]]
+			coincident = (len(np.unique(pairs[:, 0] // n_atoms)), indices)
+		return exposed[:n_target].reshape(n_frames, n_atoms) * self._dot_area, coincident
+
+	def _new_arrays(self, n_frames: int) -> tuple[np.ndarray, np.ndarray | None]:
+		"""Empty (body SASA (n_bodies, n_frames), atom SASA (n_atoms, n_frames) or None) of a run."""
+		atoms = np.zeros((self.ag.n_atoms, n_frames)) if self.keep_atoms else None
+		return np.zeros((self.n_bodies, n_frames)), atoms
+
+	def _store(self, arrays: tuple[np.ndarray, np.ndarray | None], areas: np.ndarray, block: slice) -> None:
+		"""Store the (n_frames, n_active) SASA of a block of frames: summed per body, and per atom if kept."""
+		bodies, atoms = arrays
+		n_frames = len(areas)
+		index = (np.arange(n_frames)[:, None] * self.n_bodies + self._active_body[None]).ravel()
+		bodies[:, block] = np.bincount(index, weights=areas.ravel(),
+		                               minlength=n_frames * self.n_bodies).reshape(n_frames, -1).T
+		if atoms is not None:
+			atoms[self._active, block] = areas.T
+
+	def _to_results(self, arrays: tuple[np.ndarray, np.ndarray | None], times: list, frames: np.ndarray) -> Results:
+		bodies, atoms = arrays
+		return Results(times, frames, bodies, self.body_labels, self.body_type_labels, atoms,
+		               [atom_label(atom) for atom in self.ag] if atoms is not None else None,
+		               atom_body=self._body_of_atom, ag=self.ag)
+
+	# --- results
+	def _require_results(self) -> Results:
+		"""The results of the last run; RuntimeError before a run."""
+		if self.results is None:
 			raise RuntimeError("No SASA computed yet: call run() first.")
-		if atoms and self.sasa is None:
-			raise RuntimeError("The SASA of every atom was not saved (save_atoms=False): only the total "
-			                   "and molecule SASA are available.")
+		return self.results
 
-	def get_sasa(self, selection: str | mda.AtomGroup | None = None, per_atom: bool = False) -> np.ndarray:
+	def save(self, fname: str | Path, table: tuple[list[str], np.ndarray] | None = None, **meta) -> None:
 		"""
-		SASA (nm^2) over time of a selection of the atoms of ag, from the last SASA.run().
-
-		The SASA of every atom is that within its own (whole) molecule, so the SASA
-		of a selection is the part of the molecules' surface that belongs to its
-		atoms, not the SASA of the selected atoms on their own.
+		Save the results of the last :meth:`run` (with ``buried`` also without the
+		environment) and how they were computed to an npz file, see :func:`load`.
 
 		Parameters
 		----------
-		selection : str or MDAnalysis.AtomGroup, optional
-			selection string, applied to ``ag`` (e.g. ``'name C*'``, ``'resid 1'``), or an
-			AtomGroup whose atoms are all in ``ag``; default all atoms of ``ag`` (the total,
-			also without ``save_atoms``; selections need ``save_atoms``)
-		per_atom : bool
-			return the SASA of every selected atom instead of their sum
-
-		Returns
-		-------
-		np.ndarray
-			(n_frames,) summed SASA, or with ``per_atom`` (n_selected, n_frames), atoms
-			in the order of the selection
-
-		Examples
-		--------
-		>>> sasa.run()
-		>>> sasa.get_sasa('name S*')         # SASA of the sulfur atoms over time
-		>>> sasa.get_sasa(u.select_atoms('resname GLY'), per_atom=True)
+		fname : str or Path
+			npz file
+		table : tuple, optional
+			(labels, (n_columns, n_frames) values) of a table to save as well (e.g. from
+			:meth:`Results.table`)
+		**meta
+			more information to keep (e.g. the selection), JSON-serialisable
 		"""
-		if selection is None and not per_atom:
-			self._check_run()
-			return self.total_sasa
-		self._check_run(atoms=True)
-		atoms = self.sasa[self._ag_indices(selection)]
-		return atoms if per_atom else atoms.sum(axis=0)
+		from . import __version__
+		info = {'sassy': __version__, 'bodies': self.bodies, 'probe': self.probe, 'ndots': len(self.dots),
+		        'cg': self.cg, 'n_atoms': self.ag.n_atoms,
+		        'n_environment': None if self.environment is None else self.environment.n_atoms}
+		save(fname, self._require_results(), self.free, meta=info | meta, table=table)
 
-	def molecule_number(self, molecule: int | str) -> int:
-		"""
-		Index (0, 1, ...) of a molecule given by its index (negative counts from the end) or
-		its label (e.g. 'GSH2', see :attr:`molecule_labels`).
-		"""
-		if isinstance(molecule, str):
-			if molecule not in self.molecule_labels:
-				raise KeyError(f"No molecule {molecule!r}; labels: {', '.join(self.molecule_labels[:10])}"
-				               f"{', ...' if self.n_molecules > 10 else ''}.")
-			return self.molecule_labels.index(molecule)
-		if not -self.n_molecules <= molecule < self.n_molecules:
-			raise IndexError(f"Molecule index {molecule} out of range for {self.n_molecules} molecule(s).")
-		return int(molecule) % self.n_molecules
+	# --- bodies
+	def body_index(self, body: int | str) -> int:
+		"""Index (0, 1, ...) of a body by its index (negative counts from the end) or label (e.g. 'GSH2')."""
+		return body_index(self.body_labels, body)
 
-	def get_type_sasa(self, name: str, total: bool = False) -> np.ndarray:
-		"""
-		SASA (nm^2) over time of the molecules of one type (see :attr:`types`), from the
-		last SASA.run(): (n_molecules_of_type, n_frames), or with ``total`` their sum (n_frames,).
-		"""
-		self._check_run()
-		if name not in self.types:
-			raise KeyError(f"No molecule type {name!r}; types: {', '.join(self.types)}.")
-		values = self.molecule_sasa[self.types[name]]
-		return values.sum(axis=0) if total else values
-
-	def get_molecule_sasa(self, index: int | str | ArrayLike | None = None) -> np.ndarray:
-		"""
-		SASA (nm^2) over time of molecules, by molecule index (0, 1, ... in the order
-		of :func:`split_molecules`) or label (see :attr:`molecule_labels`), from the last
-		SASA.run().
-
-		Parameters
-		----------
-		index : int, str or array-like of int, optional
-			molecule index or indices (negative indices count from the end), or a label
-			(e.g. 'GSH2'); default all molecules
-
-		Returns
-		-------
-		np.ndarray
-			(n_frames,) for a single index, else (n_indices, n_frames)
-
-		Examples
-		--------
-		>>> sasa.get_molecule_sasa(0)         # first molecule
-		>>> sasa.get_molecule_sasa([0, 2])    # first and third molecule
-		>>> sasa.get_molecule_sasa('GSH2')    # by label
-		"""
-		self._check_run()
-		if index is None:
-			return self.molecule_sasa
-		if isinstance(index, str):
-			return self.molecule_sasa[self.molecule_number(index)]
-		index = np.asarray(index)
-		if not np.issubdtype(index.dtype, np.integer):
-			raise TypeError(f"Molecule indices must be integers, got {index.dtype}.")
-		if ((index < -self.n_molecules) | (index >= self.n_molecules)).any():
-			raise IndexError(f"Molecule index out of range for {self.n_molecules} molecule(s): {index.tolist()}.")
-		return self.molecule_sasa[index]
-
-
-	# SASA surface visualization
-	def molecule_atoms(self, molecule: int | str | None = None) -> mda.AtomGroup:
-		"""
-		Atoms of a molecule (index as in :meth:`get_molecule_sasa`, negative counts from
-		the end, or label); all atoms of ``ag`` for None.
-		"""
-		if molecule is None:
+	def body_atoms(self, body: int | str | None = None) -> mda.AtomGroup:
+		"""Atoms of a body (index, negative counts from the end, or label); all atoms of ``ag`` for None."""
+		if body is None:
 			return self.ag
-		return self.ag[self._members[self.molecule_number(molecule)]]
+		return self.ag[self._members[self.body_index(body)]]
 
-	def _molecule_remark(self, atoms: mda.AtomGroup, molecule: int) -> str:
-		"""REMARK record naming the atoms of a written surface: which molecule, or the whole AtomGroup."""
-		name = atoms.moltypes[0] if hasattr(atoms, 'moltypes') else (
-		       '/'.join(dict.fromkeys(atoms.resnames)) if hasattr(atoms, 'resnames') else 'molecule')
-		resids = atoms.resids if hasattr(atoms, 'resids') else atoms.resindices + 1
-		residues = f"resid {resids.min()}" if resids.min() == resids.max() else f"resids {resids.min()}-{resids.max()}"
-		described = f"{name}, {residues}, {atoms.n_atoms} atoms"
-		if not self.per_molecule:
-			return f"Whole selection as one body ({described})"
-		return f"Molecule {molecule % self.n_molecules} of {self.n_molecules} ({described}), on its own"
-
-	def representative(self, molecule_type: str, statistic: str | Callable[[np.ndarray], float] | float = 'median',
-	                   frame: int | None = None) -> tuple[int, int, float]:
+	# --- surfaces
+	def surface(self, body: int | str = 0, frame: int | None = None,
+	            reference: ArrayLike | mda.AtomGroup | None = None, ndots: int = SURFACE_DOTS,
+	            body_type: str | None = None,
+	            statistic: str | Callable[[np.ndarray], float] | float = 'median') -> Surface:
 		"""
-		A representative molecule of a type and frame: the statistic is taken over the SASA
-		distribution of that type only (all its molecules in all analysed frames of the last
-		:meth:`run`), and the (molecule, frame) whose SASA is closest to it is chosen.
+		The structure and its solvent accessible surface dots (Connolly-style dot surface) in
+		one frame, with the radii and probe of this SASA; write it with :meth:`Surface.write`
+		(PDB or GRO), see :func:`generate_surface`.
+
+		The surface is that of one body (see ``bodies``): a molecule or residue on its own,
+		or the whole AtomGroup with ``bodies='selection'``. With an environment, only the
+		part left uncovered by it; the environment atoms within reach are kept too.
+
+		Statistics are taken over the SASA distribution of the body's type only (all
+		bodies of the type in all analysed frames; with ``bodies='selection'``: the total),
+		so every type has its own median, mean, ... (see :meth:`Results.representative`).
 
 		Parameters
 		----------
-		molecule_type : str
-			type (see :attr:`types`)
-		statistic : str, callable or float
-			see :meth:`write_surface`
-		frame : int, optional
-			fixed trajectory frame (negative counts from the end): only the molecule is chosen
-			(the first of the type if the frame was not analysed); IndexError if out of range
-
-		Returns
-		-------
-		molecule : int
-			molecule index
-		frame : int
-			trajectory frame
-		target : float
-			the statistic (nm^2) of the type's distribution
-		"""
-		self._check_run()
-		if molecule_type not in self.types:
-			raise KeyError(f"No molecule type {molecule_type!r}; types: {', '.join(self.types)}.")
-		function, _ = _statistic(statistic)
-		molecules = self.types[molecule_type]
-		values = self.molecule_sasa[molecules] # (n_molecules_of_type, n_frames)
-		target = float(function(values.ravel()))
-		if frame is None:
-			k, column = np.unravel_index(np.argmin(np.abs(values - target)), values.shape)
-			return int(molecules[k]), int(self.frames[column]), target
-		n_frames = self.ag.universe.trajectory.n_frames
-		if not -n_frames <= frame < n_frames:
-			raise IndexError(f"Frame {frame} out of range for {n_frames} frame(s).")
-		frame = int(frame) % n_frames
-		analysed = np.flatnonzero(self.frames == frame)
-		if not len(analysed):
-			return int(molecules[0]), frame, target
-		return int(molecules[np.argmin(np.abs(values[:, analysed[0]] - target))]), frame, target
-
-	def write_surface(self, fname: str, frame: int | None = None, molecule: int | str = 0,
-	                  reference: ArrayLike | mda.AtomGroup | None = None,
-	                  ndots: int = SURFACE_DOTS, return_surface: bool = False,
-	                  statistic: str | Callable[[np.ndarray], float] | float = 'median',
-	                  molecule_type: str | None = None) -> Surface | None:
-		"""
-		Write the structure and its solvent accessible surface dots (Connolly-style dot
-		surface) in one frame to a PDB file, with the radii and probe of this SASA; see
-		:func:`generate_surface` and :meth:`Surface.write` (format).
-
-		The surface follows the overlap mode of the SASA: with ``per_molecule`` it is the
-		surface of a single molecule (on its own), else that of the whole AtomGroup.
-
-		Statistics are taken over the SASA distribution of the molecule's type only (all
-		molecules of the type in all analysed frames; whole mode: the total), so every type
-		has its own median, mean, ...
-
-		Parameters
-		----------
-		fname : str
-			PDB file to write
+		body : int or str
+			index of the body (negative counts from the end) or its label (e.g. 'GSH2'),
+			default the first; with ``bodies='selection'`` the whole AtomGroup is the only
+			body (0, 'selection')
 		frame : int, optional
 			trajectory frame (negative counts from the end); default the analysed frame of the
-			molecule whose SASA is closest to ``statistic`` (by default the median) of its
+			body whose SASA is closest to ``statistic`` (by default the median) of its
 			type's distribution, i.e. a representative structure
-		molecule : int or str
-			with ``per_molecule``: index of the molecule (as in :meth:`get_molecule_sasa`,
-			negative counts from the end) or its label (e.g. 'GSH2'), default the first;
-			without: the whole AtomGroup is the only molecule (0)
-		molecule_type : str, optional
-			instead of ``molecule``: a type (see :attr:`types`); its representative molecule
-			and frame are used, see :meth:`representative` (with ``frame``: the molecule
-			closest to the statistic in that frame; with ``reference``: its first molecule)
 		reference : np.ndarray or MDAnalysis.AtomGroup, optional
 			reference structure, (n_atoms, 3) positions (nm) or an AtomGroup with as many
 			atoms as the surface (in the same order, e.g. a mapped atomistic structure for
@@ -531,69 +454,57 @@ class SASA:
 			that both surfaces share one coordinate frame
 		ndots : int
 			minimum number of dots per atom (fewer than for the SASA, as dots are for viewing)
+		body_type : str, optional
+			instead of ``body``: a type (see :attr:`body_type_indices`); its representative
+			body and frame (with ``frame``: the body closest to the statistic in that frame;
+			with ``reference``: its first body)
 		statistic : str, callable or float
 			without ``frame`` and ``reference``: the representative frame is the one whose SASA
 			is closest to this statistic of the type's SASA distribution: a name ('median',
 			'mean', 'mode' (most probable SASA), 'q1', 'q3' (quartiles), 'min', 'max',
 			'mean+std', 'mean-std', see :data:`STATISTICS`), a function of the SASA values
 			(e.g. ``lambda sasa: np.percentile(sasa, 90)``), or a fixed SASA (nm^2)
-		return_surface : bool
-			return the written :class:`Surface` (structure, dots, area in nm^2 from the
-			dots, frame, ...) instead of None
 
 		Returns
 		-------
-		Surface or None
-			the written surface with ``return_surface``, else None
-		"""
-		function, name = _statistic(statistic) # checked also when not used
-		chosen = None # remark on how the frame was chosen
-		if molecule_type is not None:
-			if molecule_type not in self.types:
-				raise KeyError(f"No molecule type {molecule_type!r}; types: {', '.join(self.types)}.")
-			if reference is not None:
-				molecule = int(self.types[molecule_type][0])
-			else:
-				molecule, frame, target = self.representative(molecule_type, function, frame)
-				chosen = self._chosen_remark(molecule, frame, target, name, molecule_choice=True)
-		else:
-			if not self.per_molecule and molecule not in (0, -1, 'selection'):
-				raise ValueError(f"Molecule {molecule}: without per_molecule the surface is that of the whole "
-				                 f"AtomGroup (molecule 0).")
-			molecule = self.molecule_number(molecule)
-			if frame is None and reference is None:
-				self._check_run()
-				target = float(function(self.get_type_sasa(self.molecule_types[molecule]).ravel()))
-				series = self.get_molecule_sasa(molecule)
-				frame = int(self.frames[np.argmin(np.abs(series - target))])
-				chosen = self._chosen_remark(molecule, frame, target, name)
-		atoms = self.molecule_atoms(molecule) # whole mode: all of ag
-		indices = self._lookup[atoms.indices]
-		result = generate_surface(atoms, radii=self.radii[indices], custom_radii=self._custom_radii,
-		                          probe=self.probe, block=self._molecule_of_atom[indices], frame=frame,
-		                          reference=reference, frames=self.frames, ndots=ndots, cg=self.cg)
-		result.remarks.insert(2, self._molecule_remark(atoms, molecule)) # after the frame
-		if chosen is not None:
-			result.remarks.insert(3, chosen)
-		result.molecule = molecule
-		result.write(fname)
-		logger.info("wrote the surface of %s in frame %d (%d atoms, %d dots, SASA %.3f nm^2) to %s",
-		            self.molecule_labels[molecule], result.frame, result.atoms.n_atoms, len(result.dots),
-		            result.area, fname)
-		return result if return_surface else None
+		Surface
+			structure, dots, area (nm^2, from the dots), frame, ...
 
-	def _chosen_remark(self, molecule: int, frame: int, target: float, name: str,
-	                   molecule_choice: bool = False) -> str:
-		"""REMARK on how the frame (and molecule) of a surface was chosen; also logged."""
-		molecule_type = self.molecule_types[molecule]
-		n_molecules = len(self.types[molecule_type])
-		analysed = np.flatnonzero(self.frames == frame)
-		sasa = f"{self.molecule_sasa[molecule, analysed[0]]:.3f} nm^2" if len(analysed) else "not analysed"
-		pool = (f"{n_molecules} {molecule_type} molecule(s) x {len(self.frames)} analysed frame(s)"
-		        if self.per_molecule else f"{len(self.frames)} analysed frame(s)")
-		what = (f"Representative molecule and frame: {self.molecule_labels[molecule]} in frame {frame}"
-		        if molecule_choice else "Representative frame")
-		logger.info("%s %s in frame %d: SASA %s, closest to the %s (%.3f nm^2) of %s",
-		            'representative' if molecule_choice else 'surface of', self.molecule_labels[molecule], frame,
-		            sasa, name, target, pool)
-		return f"{what}: SASA ({sasa}) closest to the {name} ({target:.3f} nm^2) of {pool}"
+		Examples
+		--------
+		>>> sasa.surface(body_type='GSH').write('GSH_sasa.pdb')  # representative GSH and frame
+		>>> sasa.surface('GSH2', frame=-1).write('last.gro')
+		"""
+		function, name = resolve_statistic(statistic) # checked also when not used
+		if frame is not None: # negative counts from the end; IndexError if out of range
+			frame = int(np.arange(self.ag.universe.trajectory.n_frames)[frame])
+
+		# choose the body and frame
+		chosen = None # remark on how they were chosen
+		if body_type is not None and reference is not None: # the frame comes from the reference
+			if body_type not in self.body_type_indices:
+				raise KeyError(f"No body type {body_type!r}; types: {', '.join(self.body_type_indices)}.")
+			body = int(self.body_type_indices[body_type][0])
+		elif reference is None and (body_type is not None or frame is None): # from the statistic
+			choice = {'body_type': body_type} if body_type is not None else {'body': body}
+			body, frame, target = self._require_results().representative(statistic=function, frame=frame, **choice)
+			chosen = chosen_remark(self.results, self.bodies, body, frame, target, name,
+			                       body_choice=body_type is not None)
+		else:
+			body = self.body_index(body)
+
+		atoms = self.body_atoms(body) # bodies='selection': all of ag
+		in_ag = self._ag_position[atoms.indices]
+		remarks = [body_remark(atoms, self.bodies, body, self.n_bodies,
+		                       None if self.environment is None else self.environment.n_atoms)]
+		remarks += ([chosen] if chosen else []) + radii_remarks(atoms, cg=self.cg, custom=self._custom_radii,
+		                                                        probe=self.probe)
+		environment = {} if self.environment is None else {'environment': self.environment,
+		                                                   'environment_radii': self._env_radii}
+		surface = generate_surface(atoms, radii=self.radii[in_ag], probe=self.probe, block=self._body_of_atom[in_ag],
+		                           frame=frame, reference=reference, ndots=ndots, cg=self.cg, remarks=remarks,
+		                           frames=None if self.results is None else self.results.frames, body=body,
+		                           **environment)
+		logger.info("surface of %s in frame %d: %d atoms, %d dots, SASA %.3f nm^2", self.body_labels[body],
+		            surface.frame, surface.atoms.n_atoms, len(surface.dots), surface.area)
+		return surface

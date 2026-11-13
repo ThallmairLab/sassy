@@ -27,6 +27,6 @@ def test_matches_gmx_sasa():
     """
     reference = np.loadtxt(DATA / 'gmx_sasa_area.xvg', comments=['#', '@'])
     universe = mda.Universe(str(DATA / 'atomistic.tpr'), str(DATA / 'atomistic.xtc'))
-    sasa = SASA(universe.atoms).run()[0]
+    sasa = SASA(universe.atoms).run().body_sasa[0]
     assert len(sasa) == len(reference) == 501
     assert np.allclose(sasa, reference[:, 1], rtol=0, atol=1e-3)

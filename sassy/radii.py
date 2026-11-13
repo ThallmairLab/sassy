@@ -10,6 +10,7 @@ tiny bead.
 from collections.abc import Mapping
 import logging
 import numpy as np
+from numpy.typing import ArrayLike
 import MDAnalysis as mda
 
 from .groups import atom_label
@@ -54,12 +55,14 @@ def _element_guesser():
 
 def atom_symbols(ag: mda.AtomGroup, cg: bool = False) -> list[str]:
 	'''
-	Symbols used to look up the radius of each atom
-	- AA: respective element; for an empty element (e.g. a virtual site) the first letter of the
-		  atom name. If the topology has no elements (e.g. gro, pdb without element column),
-		  they are guessed from the atom names with the MDAnalysis guesser ('CLA' -> 'Cl', 'SOD' -> 'Na'),
-	 	  without changing ``ag``.
-	- CG: bead size (R = regular, S = small, T = tiny, U = dummy) derived from atom type.
+	Symbol of every atom, used to look up its radius:
+
+	- atomistic: its element; for an empty element (e.g. a virtual site) the first letter of
+	  the atom name. Without elements in the topology (e.g. gro, pdb without element
+	  column), the element is guessed from the atom name with the MDAnalysis guesser
+	  ('CLA' -> 'Cl', 'SOD' -> 'Na'), without changing ``ag``.
+	- CG (``cg=True``): the bead size from the atom type (T tiny, S small, U dummy, else R
+	  regular).
 	'''
 	if cg:
 		size = {at: at[:1] if at[:1] in ("S", "T", "U") else "R" for at in set(ag.types)}
@@ -95,6 +98,27 @@ def radii_remarks(ag: mda.AtomGroup, cg: bool = False, custom: bool = False,
 			remarks.append("Phosphorus radius: Bondi (1964), doi:10.1021/j100785a001")
 	remarks.append(f"Probe radius {probe} nm")
 	return remarks
+
+def resolve_radii(ag: mda.AtomGroup, radii: ArrayLike | Mapping[str, float] | None = None,
+                  cg: bool = False) -> tuple[np.ndarray, Mapping[str, float] | None]:
+	'''
+	The radii (nm) of the atoms of ``ag`` from what a user gives: None (the defaults), a dict
+	by symbol that adds to or replaces the defaults (see :func:`atom_radii`), or an array with
+	one radius per atom.
+
+	Returns
+	-------
+	radii : np.ndarray
+		(n_atoms,) radii of the atoms of ``ag``
+	table : dict or None
+		the dict, if one was given (e.g. to apply it to other atoms too), else None
+	'''
+	if radii is None or isinstance(radii, Mapping):
+		return atom_radii(ag, cg=cg, table=radii), radii
+	radii = np.asarray(radii, dtype=float)
+	if radii.shape != (ag.n_atoms,):
+		raise ValueError(f"radii must have one value per atom ({ag.n_atoms}), got shape {radii.shape}.")
+	return radii, None
 
 def atom_radii(ag: mda.AtomGroup, cg: bool = False, table: Mapping[str, float] | None = None) -> np.ndarray:
 	'''
