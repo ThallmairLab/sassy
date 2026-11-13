@@ -1,8 +1,9 @@
 """
-Command line interface: SASA of the molecules, atoms or selections of a
-trajectory, written as an xvg (text) or npz file.
+Command line interface: SASA of the molecules, residues, atoms or selections of a
+trajectory, optionally covered by an environment, written as an xvg (text) or npz file.
 
 	sassy -s topol.tpr -f traj.xtc -select 'moltype GSH' -o sasa.xvg
+	sassy -s topol.tpr -f traj.xtc -select 'resname LIG' -env protein -buried -o ligand.xvg
 """
 import argparse
 import logging
@@ -15,10 +16,10 @@ import MDAnalysis as mda
 from MDAnalysis.exceptions import SelectionError
 
 from .. import __version__
-from ..groups import atom_label
-from ..radii import PROBE_RADIUS
-from ..sasa import N_DOTS, SASA
-from ..surface import STATISTICS, SURFACE_DOTS
+from sassy.groups import atom_label
+from sassy.radii import PROBE_RADIUS
+from sassy.sasa import BODIES, N_DOTS, SASA
+from sassy.surface import STATISTICS, SURFACE_DOTS
 
 logger = logging.getLogger('sassy')
 
@@ -99,10 +100,11 @@ def parser() -> argparse.ArgumentParser:
 	p = argparse.ArgumentParser(
 		prog='sassy',
 		description="Shrake-Rupley solvent accessible surface area (nm^2) of a selection over a "
-		            "trajectory. By default every molecule is taken on its own (other molecules "
-		            "do not bury it) and gets its own column; with whole the selection is one "
-		            "body (its molecules bury each other) and one column is written. Columns "
-		            "per atom (per-atom) or per group (group) instead.",
+		            "trajectory. Two independent settings decide what buries an atom: -bodies splits "
+		            "the selection into bodies whose atoms bury each other (by default every molecule "
+		            "on its own, other molecules do not bury it), and -env adds atoms that bury every "
+		            "body without being counted (e.g. a protein around a ligand). One column per body, "
+		            "or per atom (-per-atom) or per group (-group) instead.",
 		formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 	p.add_argument('-V', action='version', version=f'%(prog)s {__version__}')
 
@@ -114,14 +116,24 @@ def parser() -> argparse.ArgumentParser:
 	                help='save plots (PNG) to this directory, the current one if none is given: total SASA '
 	                     'over time with running mean, every molecule/group over time, distributions')
 
-	sel = p.add_argument_group('selection')
-	sel.add_argument('-select', default='all', help='MDAnalysis selection of the atoms whose SASA is computed')
-	sel.add_argument('-whole', action='store_true', help='SASA of the whole selection as one body (its molecules bury each other), '
-	                 'one column instead of one per molecule (each on its own)')
-	sel.add_argument('-per-atom', action='store_true', help='one column per atom instead of per molecule/selection')
-	sel.add_argument('-group', action='append', default=[], metavar='SELECTION',
-	                 help='one column with the summed SASA of these atoms (MDAnalysis selection within select); repeatable')
-	sel.add_argument('-total', action='store_true', help='add a column with the total SASA of the selection')
+	burial = p.add_argument_group('selection and burial', 'which atoms are computed, and which atoms bury them')
+	burial.add_argument('-select', default='all', help='MDAnalysis selection of the atoms whose SASA is computed')
+	burial.add_argument('-bodies', choices=BODIES, default='molecule',
+	                    help='atoms bury each other only within a body: every molecule on its own, every residue '
+	                         'on its own, or the whole selection as one body (its molecules bury each other); '
+	                         'one column per body')
+	burial.add_argument('-env', default=None, metavar='SELECTION', dest='environment',
+	                    help='environment: MDAnalysis selection of atoms that bury every body without being counted '
+	                         '(e.g. protein around a ligand); must not overlap select')
+	burial.add_argument('-buried', action='store_true',
+	                    help='with -env: also write the area buried by the environment (SASA without minus with '
+	                         'it) as extra columns labelled "<column> buried"')
+
+	columns = p.add_argument_group('output columns', 'with any -bodies and -env')
+	columns.add_argument('-per-atom', action='store_true', help='one column per atom instead of per body')
+	columns.add_argument('-group', action='append', default=[], metavar='SELECTION',
+	                     help='one column with the summed SASA of these atoms (MDAnalysis selection within select); repeatable')
+	columns.add_argument('-total', action='store_true', help='add a column with the total SASA of the selection')
 
 	frames = p.add_argument_group('frames', 'frame indices (0 = first; not times in ps as in GROMACS), '
 	                              'as in Python slicing trajectory[b:e:skip]')
@@ -141,8 +153,9 @@ def parser() -> argparse.ArgumentParser:
 	                            'dot surface) of one frame as PDB: atoms as ATOM, dots as HETATM records named DOT with the residue of their atom')
 	surf.add_argument('-surface', nargs='?', const='.', default=None, metavar='DIR',
 	                  help='write the surface of a representative molecule of every molecule type to DIR/<type>_sasa.pdb '
-	                       '(e.g. GSH_sasa.pdb; the current directory if no DIR is given); with -whole that of the '
-	                       'whole selection (selection_sasa.pdb)')
+	                       '(e.g. GSH_sasa.pdb; the current directory if no DIR is given); with -bodies residue of '
+	                       'every residue type, with -bodies selection that of the whole selection '
+	                       '(selection_sasa.pdb); with -env the environment atoms within reach as chain B')
 	surf.add_argument('-surface-molecule', default=None, metavar='MOLECULE',
 	                  help='instead: only the surface of this molecule, by index (0 = first) or column label (e.g. '
 	                       'GSH2), written to <label>_sasa.pdb')
@@ -169,26 +182,27 @@ def parser() -> argparse.ArgumentParser:
 	return p
 
 
-def _columns(sasa: SASA, args: argparse.Namespace) -> tuple[np.ndarray, list[str]]:
-	"""(n_columns, n_frames) SASA and the column labels."""
+def _columns(sasa: SASA, args: argparse.Namespace, buried: bool = False) -> tuple[np.ndarray, list[str]]:
+	"""(n_columns, n_frames) SASA, or with ``buried`` the area buried by the environment, and the column labels."""
+	get_sasa = sasa.get_buried_sasa if buried else sasa.get_sasa
+	get_molecule_sasa = sasa.get_buried_molecule_sasa if buried else sasa.get_molecule_sasa
 	columns, labels = [], []
+	body_columns = not args.group and not args.per_atom
 	if args.group:
 		for group in args.group:
-			columns.append(sasa.get_sasa(group))
+			columns.append(get_sasa(group))
 			labels.append(group)
 	elif args.per_atom:
-		columns.extend(sasa.sasa)
+		columns.extend(get_sasa(per_atom=True))
 		labels.extend(atom_label(a) for a in sasa.ag)
-	elif args.whole: # one column: the total already
-		columns.append(sasa.get_sasa())
-		labels.append(args.select)
-		return np.array(columns).reshape(1, len(sasa.frames)), labels
-	else:
-		columns.extend(sasa.get_molecule_sasa())
-		labels.extend(sasa.molecule_labels)
-	if args.total:
-		columns.append(sasa.get_sasa())
+	else: # one column per body; the whole selection is labelled by its selection
+		columns.extend(get_molecule_sasa())
+		labels.extend([args.select] if sasa.bodies == 'selection' else sasa.molecule_labels)
+	if args.total and not (body_columns and sasa.bodies == 'selection'): # unless the only column is the total
+		columns.append(get_sasa())
 		labels.append('total')
+	if buried:
+		labels = [f"{label} buried" for label in labels]
 	n_frames = len(sasa.frames)
 	return np.array(columns).reshape(len(columns), n_frames), labels
 
@@ -211,8 +225,8 @@ def _surface_options(args: argparse.Namespace, sasa: SASA) -> list[dict] | bool:
 		return False
 	common = {'frame': args.surface_frame, 'statistic': args.surface_stat, 'ndots': args.surface_ndots}
 	if args.surface_molecule is not None:
-		if args.whole:
-			logger.error("-surface-molecule cannot be combined with -whole (the selection is one body)")
+		if sasa.bodies == 'selection':
+			logger.error("-surface-molecule cannot be combined with -bodies selection (the selection is one body)")
 			return False
 		labels = sasa.molecule_labels
 		text = args.surface_molecule
@@ -248,8 +262,7 @@ def _surface_options(args: argparse.Namespace, sasa: SASA) -> list[dict] | bool:
 		n_atoms = sasa.molecule_atoms(molecule).n_atoms
 		if reference.n_atoms != n_atoms:
 			logger.error("the reference structure %s has %d atoms, but the surface (%s) has %d", args.surface_ref,
-			             reference.n_atoms, 'whole selection' if args.whole else sasa.molecule_labels[molecule],
-			             n_atoms)
+			             reference.n_atoms, sasa.molecule_labels[molecule], n_atoms)
 			return False
 		job['reference'] = reference
 	n_frames = sasa.ag.universe.trajectory.n_frames
@@ -262,13 +275,13 @@ def _surface_options(args: argparse.Namespace, sasa: SASA) -> list[dict] | bool:
 def _highlight(sasa: SASA, args: argparse.Namespace, surface):
 	"""
 	The frame of the surface for the plots: its time, and, if the frame was analysed, the
-	SASA of its molecule (of the selection with -whole) and with -per-atom of its atoms.
-	Groups are no molecules: time only.
+	SASA of its body (molecule, residue or the whole selection) and with -per-atom of its atoms.
+	Groups are no bodies: time only.
 	"""
 	from ..plots import Highlight, atom_sasa_at
 	series = surface.molecule
 	label = f"surface frame {surface.frame}"
-	if not args.whole:
+	if sasa.bodies != 'selection':
 		label += f" ({sasa.molecule_labels[series]})"
 	analysed = np.flatnonzero(sasa.frames == surface.frame)
 	if args.group or not len(analysed):
@@ -298,6 +311,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 	args = p.parse_args(argv)
 	if args.per_atom and args.group:
 		p.error('per-atom and group cannot be combined')
+	if args.buried and args.environment is None:
+		p.error('-buried needs an environment (-env)')
 	if args.threads is not None:
 		import numba
 		if args.threads > numba.config.NUMBA_NUM_THREADS:
@@ -330,29 +345,38 @@ def main(argv: Sequence[str] | None = None) -> int:
 				logger.error("the group %r contains no atoms of the selection", group)
 				return 1
 			logger.debug("group %r: %d atom(s)", group, n_group)
+		environment = None
+		if args.environment is not None:
+			environment = universe.select_atoms(args.environment)
+			if not environment.n_atoms:
+				logger.error("the environment %r contains no atoms", args.environment)
+				return 1
 	except SelectionError as error:
 		logger.error("invalid selection: %s", error)
 		return 1
 
 	try:
 		sasa = SASA(ag, cg=args.cg, probe=args.probe, ndots=args.ndots, radii=dict(args.radius) or None,
-		            max_frame_atoms=args.max_frame_atoms, per_molecule=not args.whole,
-		            save_atoms=bool(args.per_atom or args.group)) # per-atom SASA only when needed
-	except ValueError as error: # e.g. unknown elements
+		            max_frame_atoms=args.max_frame_atoms, bodies=args.bodies, environment=environment,
+		            buried=args.buried, save_atoms=bool(args.per_atom or args.group)) # per-atom SASA only when needed
+	except ValueError as error: # e.g. unknown elements, environment overlapping the selection
 		logger.error("%s", error)
 		return 1
-	if not args.whole and len(sasa.types) > 1:
+	if sasa.bodies == 'molecule' and len(sasa.types) > 1:
 		logger.warning("the selection %r contains %d different molecule types; their molecules are written "
-		               "as columns side by side (whole: one column for the selection)", args.select, len(sasa.types))
+		               "as columns side by side (-bodies selection: one column for the selection)", args.select,
+		               len(sasa.types))
 	surface = _surface_options(args, sasa) if args.surface else None
 	if surface is False:
 		return 1
-	logger.info("%d atoms in %d %s, %d frame(s)", ag.n_atoms, sasa.n_molecules,
-	            'body (whole selection)' if args.whole else 'molecule(s)',
+	logger.info("%d atoms in %s, %d frame(s)", ag.n_atoms, sasa.describe(),
 	            len(universe.trajectory[args.start:args.stop:args.step]))
 	sasa.run(start=args.start, stop=args.stop, step=args.step, verbose=not args.quiet)
 
 	columns, labels = _columns(sasa, args)
+	if args.buried: # after the SASA columns, the same columns of the buried area
+		buried, buried_labels = _columns(sasa, args, buried=True)
+		columns, labels = np.vstack([columns, buried]), labels + buried_labels
 	output.parent.mkdir(parents=True, exist_ok=True)
 	if output.suffix.lower() == '.npz':
 		with open(output, 'wb') as out: # a file object: np.savez would append .npz to e.g. x.NPZ
@@ -376,18 +400,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 	if args.plots is not None:
 		from ..plots import pooled_atom_sasa, save_plots
-		kind = 'group' if args.group else 'whole' if args.whole else 'molecule'
+		kind = 'group' if args.group else {'molecule': 'molecule', 'residue': 'residue', 'selection': 'whole'}[sasa.bodies]
 		if args.group:
-			has_total = args.total # the last column is the total
-			values, series_labels = (columns[:-1], labels[:-1]) if has_total else (columns, labels)
-		elif args.whole:
+			values, series_labels = np.array([sasa.get_sasa(group) for group in args.group]), args.group
+		elif sasa.bodies == 'selection':
 			values, series_labels = sasa.get_sasa()[None], [args.select]
-		else: # molecules, also with -per-atom: the same plots as without
+		else: # bodies, also with -per-atom: the same plots as without
 			values, series_labels = sasa.get_molecule_sasa(), sasa.molecule_labels
 		atom_labels, atoms = pooled_atom_sasa(sasa) if args.per_atom else (None, None)
 		save_plots(args.plots, sasa.times, values, series_labels, total=sasa.get_sasa(), kind=kind,
 		           atoms=atoms, atom_labels=atom_labels, highlight=highlights,
-		           types=sasa.molecule_types if kind == 'molecule' else None)
+		           types=sasa.molecule_types if kind in ('molecule', 'residue') else None)
 	return status
 
 

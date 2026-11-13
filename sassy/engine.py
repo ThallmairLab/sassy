@@ -9,7 +9,8 @@ expanded sphere of a neighbour j at d_ij = x_j - x_i exactly if
 which is tested in a compiled (numba) loop over all dots, starting with the
 neighbour that buried the previous dot. Neighbour pairs are found with a k-d
 tree; spheres only bury dots of spheres in the same block (e.g. the same
-molecule in the same frame).
+molecule in the same frame). Spheres that are no target (e.g. a covering protein)
+bury the dots of the targets in their block, but get no dots of their own.
 """
 from collections.abc import Callable
 import logging
@@ -78,12 +79,13 @@ def _count_dots(starts: np.ndarray, vec: np.ndarray, threshold: np.ndarray, unit
 		counts[a] = n
 
 @njit(parallel=True, cache=True)
-def _neighbour_lists(xyz: np.ndarray, ext: np.ndarray, block: np.ndarray,
+def _neighbour_lists(xyz: np.ndarray, ext: np.ndarray, block: np.ndarray, target: np.ndarray,
                      pairs: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
 	"""
-	Neighbour lists of the spheres from candidate ``pairs`` (i < j):
-		- only pairs with overlapping spheres in the same block
-		- every pair in both directions
+	Neighbour lists of the target spheres from candidate ``pairs`` (i < j):
+		- only pairs with overlapping spheres in the same block, at least one a target
+		- every pair in both directions, but only target spheres get a list (spheres
+		  that are no target bury, but are not buried: their list stays empty)
 		- the neighbours of every sphere sorted closest first (bury the most dots)
 
 	Returns
@@ -96,7 +98,8 @@ def _neighbour_lists(xyz: np.ndarray, ext: np.ndarray, block: np.ndarray,
 	threshold : np.ndarray
 		(n_neighbours,) dot u of the sphere is inside the neighbour if ``u . vec > threshold``
 	coincident : np.ndarray
-		(n_pairs,) bool, True for the pairs of the same block at an identical position
+		(n_pairs,) bool, True for the pairs of the same block (at least one a target)
+		at an identical position
 	"""
 	n = len(xyz)
 	keep = np.zeros(len(pairs), dtype=np.bool_)
@@ -105,7 +108,7 @@ def _neighbour_lists(xyz: np.ndarray, ext: np.ndarray, block: np.ndarray,
 	starts = np.zeros(n + 1, dtype=np.int64)
 	for p in range(len(pairs)):
 		i, j = pairs[p, 0], pairs[p, 1]
-		if block[i] != block[j]:
+		if block[i] != block[j] or not (target[i] or target[j]):
 			continue
 		d2 = 0.0
 		for c in range(3):
@@ -114,8 +117,10 @@ def _neighbour_lists(xyz: np.ndarray, ext: np.ndarray, block: np.ndarray,
 			keep[p] = True
 			coincident[p] = d2 == 0.0
 			pair_dist2[p] = d2
-			starts[i + 1] += 1
-			starts[j + 1] += 1
+			if target[i]:
+				starts[i + 1] += 1
+			if target[j]:
+				starts[j + 1] += 1
 	for a in range(n):
 		starts[a + 1] += starts[a]
 	fill = starts[:-1].copy()
@@ -128,6 +133,8 @@ def _neighbour_lists(xyz: np.ndarray, ext: np.ndarray, block: np.ndarray,
 		i, j = pairs[p, 0], pairs[p, 1]
 		d2 = pair_dist2[p]
 		for own, other, sign in ((i, j, 1.0), (j, i, -1.0)):
+			if not target[own]:
+				continue
 			m = fill[own]
 			fill[own] += 1
 			for c in range(3):
@@ -146,25 +153,35 @@ def _neighbour_lists(xyz: np.ndarray, ext: np.ndarray, block: np.ndarray,
 				k -= 1
 	return starts, vec, threshold, coincident
 
-def _neighbours(xyz: ArrayLike, ext: ArrayLike,
-                block: ArrayLike) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def _target_mask(target: ArrayLike | None, n: int) -> np.ndarray:
+	"""(n,) bool mask of the target spheres; None: all spheres are targets."""
+	if target is None:
+		return np.ones(n, dtype=np.bool_)
+	target = np.ascontiguousarray(target, dtype=np.bool_)
+	if target.shape != (n,):
+		raise ValueError(f"target must have one value per sphere ({n}), got shape {target.shape}.")
+	return target
+
+def _neighbours(xyz: ArrayLike, ext: ArrayLike, block: ArrayLike,
+                target: ArrayLike | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
 	"""
 	Neighbour lists (``starts``, ``vec``, ``threshold``, see :func:`_neighbour_lists`) of
-	a set of spheres, and the (n_coincident, 2) pairs of spheres of the same block that
-	share an identical position.
+	a set of spheres, and the (n_coincident, 2) pairs of spheres of the same block (at
+	least one a target) that share an identical position.
 	"""
 	xyz = np.ascontiguousarray(xyz, dtype=np.float64)
 	ext = np.ascontiguousarray(ext, dtype=np.float64)
 	block = np.ascontiguousarray(block, dtype=np.int64)
+	target = _target_mask(target, len(xyz))
 	if len(xyz) > 1:
 		pairs = cKDTree(xyz).query_pairs(2 * ext.max(), output_type='ndarray').astype(np.int64)
 	else:
 		pairs = np.zeros((0, 2), dtype=np.int64)
-	starts, vec, threshold, coincident = _neighbour_lists(xyz, ext, block, pairs)
+	starts, vec, threshold, coincident = _neighbour_lists(xyz, ext, block, target, pairs)
 	return starts, vec, threshold, pairs[coincident]
 
-def _exposed_dots(xyz: ArrayLike, ext: ArrayLike, block: ArrayLike,
-                  unit: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _exposed_dots(xyz: ArrayLike, ext: ArrayLike, block: ArrayLike, unit: np.ndarray,
+                  target: ArrayLike | None = None) -> tuple[np.ndarray, np.ndarray]:
 	"""
 	Find the exposed dots of a set of spheres.
 
@@ -179,6 +196,10 @@ def _exposed_dots(xyz: ArrayLike, ext: ArrayLike, block: ArrayLike,
 		(used to separate molecules or frames in a trajectory)
 	unit : np.ndarray
 		(n_dots, 3) unit-sphere dots
+	target : np.ndarray, optional
+		(n,) bool, the spheres whose dots are tested; the others only bury the dots of
+		the targets in their block (their own dots are all reported exposed: ignore
+		them); default all spheres
 
 	Returns
 	-------
@@ -187,18 +208,18 @@ def _exposed_dots(xyz: ArrayLike, ext: ArrayLike, block: ArrayLike,
 	coincident : np.ndarray
 		(n_coincident, 2) pairs of spheres of the same block at an identical position
 	"""
-	starts, vec, threshold, coincident = _neighbours(xyz, ext, block)
+	starts, vec, threshold, coincident = _neighbours(xyz, ext, block, target)
 	exposed = np.empty((len(starts) - 1, len(unit)), dtype=bool)
 	_test_dots(starts, vec, threshold, np.ascontiguousarray(unit, dtype=np.float64), exposed)
 	return exposed, coincident
 
-def _exposed_counts(xyz: ArrayLike, ext: ArrayLike, block: ArrayLike,
-                    unit: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _exposed_counts(xyz: ArrayLike, ext: ArrayLike, block: ArrayLike, unit: np.ndarray,
+                    target: ArrayLike | None = None) -> tuple[np.ndarray, np.ndarray]:
 	"""
 	As :func:`_exposed_dots`, but only the (n,) number of exposed dots of every sphere
 	(no (n, n_dots) mask in memory).
 	"""
-	starts, vec, threshold, coincident = _neighbours(xyz, ext, block)
+	starts, vec, threshold, coincident = _neighbours(xyz, ext, block, target)
 	counts = np.empty(len(starts) - 1, dtype=np.int64)
 	_count_dots(starts, vec, threshold, np.ascontiguousarray(unit, dtype=np.float64), counts)
 	return counts, coincident
@@ -231,8 +252,13 @@ def warn_coincident(pairs: ArrayLike, label: Callable[[int], str] = str, frames:
 	               shown, more)
 
 def _surface_dots(xyz: ArrayLike, radii: ArrayLike, probe: float = PROBE_RADIUS, ndots: int = 240,
-                  block: ArrayLike | None = None) -> tuple[np.ndarray, np.ndarray, float, np.ndarray]:
-	"""As :func:`surface_dots`, plus the (n_coincident, 2) atom index pairs at an identical position."""
+                  block: ArrayLike | None = None,
+                  target: ArrayLike | None = None) -> tuple[np.ndarray, np.ndarray, float, np.ndarray]:
+	"""
+	As :func:`surface_dots`, plus the (n_coincident, 2) atom index pairs at an identical
+	position. With ``target`` ((n_atoms,) bool), only the dots and area of the target
+	atoms; the others only bury them.
+	"""
 	if not probe >= 0:
 		raise ValueError(f"The probe radius must be >= 0 (nm), got {probe}.")
 	xyz = np.asarray(xyz, dtype=float)
@@ -244,14 +270,17 @@ def _surface_dots(xyz: ArrayLike, radii: ArrayLike, probe: float = PROBE_RADIUS,
 	# compute the exposed dots and the SASA from them
 	expanded = radii[active] + probe
 	block = np.zeros(len(xyz), dtype=int) if block is None else np.asarray(block)
-	exposed, coincident = _exposed_dots(centres, expanded, block[active], unit)
+	target = _target_mask(target, len(xyz))[active]
+	exposed, coincident = _exposed_dots(centres, expanded, block[active], unit, target)
+	exposed &= target[:, None] # the others have no dots of their own
 	area = float(np.sum(exposed.mean(axis=1) * 4 * np.pi * expanded**2))
 	dots = (centres[:, None, :] + expanded[:, None, None] * unit[None])[exposed] # coordinates of dots
 	owners = active[np.nonzero(exposed)[0]] # index of the atom each dot belongs to
 	return dots, owners, area, active[coincident]
 
-def surface_dots(xyz: ArrayLike, radii: ArrayLike, probe: float = PROBE_RADIUS,
-                 ndots: int = 240, block: ArrayLike | None = None) -> tuple[np.ndarray, np.ndarray, float]:
+def surface_dots(xyz: ArrayLike, radii: ArrayLike, probe: float = PROBE_RADIUS, ndots: int = 240,
+                 block: ArrayLike | None = None,
+                 target: ArrayLike | None = None) -> tuple[np.ndarray, np.ndarray, float]:
 	"""
 	Generate dots of the solvent accessible surface of a set of spheres.
 
@@ -269,6 +298,9 @@ def surface_dots(xyz: ArrayLike, radii: ArrayLike, probe: float = PROBE_RADIUS,
 	block : np.ndarray, optional
 		(n_atoms,) integer block (e.g. molecule index) of every atom: atoms only bury
 		dots of atoms in the same block; default all atoms in one block
+	target : np.ndarray, optional
+		(n_atoms,) bool, the atoms whose surface is generated; the others only bury it
+		(e.g. a protein covering a ligand); default all atoms
 
 	Returns
 	-------
@@ -282,6 +314,6 @@ def surface_dots(xyz: ArrayLike, radii: ArrayLike, probe: float = PROBE_RADIUS,
 	Atoms with a radius at an identical position are warned about (logged), see
 	:func:`warn_coincident`.
 	"""
-	dots, owners, area, coincident = _surface_dots(xyz, radii, probe, ndots, block)
+	dots, owners, area, coincident = _surface_dots(xyz, radii, probe, ndots, block, target)
 	warn_coincident(coincident, label=lambda i: f"atom {i}")
 	return dots, owners, area

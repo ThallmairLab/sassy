@@ -431,8 +431,8 @@ def pooled_atom_sasa(sasa) -> tuple[list[str], list[np.ndarray]]:
 	first atom of every GSH together, the second together, ...
 
 	Molecules are of one type (:attr:`SASA.types`) if they have the same moltype (tpr), else
-	the same atom and residue names in the same order. Without ``per_molecule`` (one body) every atom is on
-	its own. Atoms without a radius (dummy beads, virtual sites: no SASA) are left out.
+	the same atom and residue names in the same order (with ``bodies='residue'``: residues of one
+	residue type); with ``bodies='selection'`` (one body) every atom is on its own. Atoms without a radius (dummy beads, virtual sites: no SASA) are left out.
 	Needs the per-atom SASA (``save_atoms=True``) of the last :meth:`SASA.run`.
 
 	Parameters
@@ -506,14 +506,14 @@ def save_plots(directory: str | Path, times: ArrayLike, values: ArrayLike, label
 	times : array-like
 		(n_frames,) times (ps)
 	values : array-like
-		(n_series, n_frames) SASA (nm^2) of the molecules or groups (for 'whole' the one body)
+		(n_series, n_frames) SASA (nm^2) of the molecules, residues or groups (for 'whole' the one body)
 	labels : list of str, optional
 		label of every series
 	total : array-like, optional
 		(n_frames,) total SASA (nm^2); default the sum of ``values``
 	kind : str
-		what the series are: 'molecule', 'group', or 'whole' (one series: the whole
-		selection as one body)
+		what the series are: 'molecule', 'residue', 'group', or 'whole' (one series: the
+		whole selection as one body)
 	atoms : list of array-like, optional
 		SASA of every atom, e.g. pooled over the molecules of its type (see
 		:func:`pooled_atom_sasa`): adds ``sasa_distribution_per_atom.png``
@@ -537,13 +537,13 @@ def save_plots(directory: str | Path, times: ArrayLike, values: ArrayLike, label
 		the written files:
 
 		- ``sasa_total.png``: total SASA over time with its running mean
-		- ``sasa_time.png``: every molecule/group over time (more than one series, or groups)
+		- ``sasa_time.png``: every molecule/residue/group over time (more than one series, or groups)
 		- ``sasa_distribution.png``: distribution of the series (of the total for 'whole')
-		- ``sasa_distribution_per_<kind>.png``: one panel per molecule/group (more than one)
+		- ``sasa_distribution_per_<kind>.png``: one panel per molecule/residue/group (more than one)
 		- ``sasa_distribution_per_atom.png``: one panel per atom (with ``atoms``)
 	"""
-	if kind not in ('molecule', 'group', 'whole'):
-		raise ValueError(f"kind must be 'molecule', 'group' or 'whole', got {kind!r}.")
+	if kind not in ('molecule', 'residue', 'group', 'whole'):
+		raise ValueError(f"kind must be 'molecule', 'residue', 'group' or 'whole', got {kind!r}.")
 	directory = Path(directory)
 	directory.mkdir(parents=True, exist_ok=True)
 	values = np.atleast_2d(np.asarray(values, dtype=float))

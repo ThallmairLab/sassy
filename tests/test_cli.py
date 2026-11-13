@@ -77,12 +77,12 @@ def two_gsh(tmp_path, shift):
 
 def test_cli_whole_selection(tmp_path):
     """
-    By default every molecule is on its own; with -whole the selection is one body
+    By default every molecule is on its own; with -bodies selection the selection is one body
     (one column, molecules bury each other).
     """
     pdb = two_gsh(tmp_path, 4.0) # overlapping copies
     whole, single = tmp_path / 'whole.xvg', tmp_path / 'single.xvg'
-    assert main(['-s', pdb, '-ndots', '240', '-whole', '-q', '-o', str(whole)]) == 0
+    assert main(['-s', pdb, '-ndots', '240', '-bodies', 'selection', '-q', '-o', str(whole)]) == 0
     assert main(['-s', pdb, '-ndots', '240', '-total', '-q', '-o', str(single)]) == 0
     whole, legends = read_xvg(whole)
     assert legends == ['all']
@@ -93,13 +93,13 @@ def test_cli_whole_selection(tmp_path):
 
     far = two_gsh(tmp_path, 100.0) # far apart: no difference
     out = tmp_path / 'far.xvg'
-    assert main(['-s', far, '-ndots', '240', '-whole', '-q', '-o', str(out)]) == 0
+    assert main(['-s', far, '-ndots', '240', '-bodies', 'selection', '-q', '-o', str(out)]) == 0
     assert read_xvg(out)[0][1] == pytest.approx(single[3], abs=1e-3)
 
 
 @pytest.mark.filterwarnings('ignore::UserWarning') # MDAnalysis writing and reading the PDB
 def test_cli_molecule_types_warning(tmp_path, capsys):
-    """Per molecule (default) warns about a selection of several molecule types, -whole does not."""
+    """Per molecule (default) warns about a selection of several molecule types, -bodies selection does not."""
     from sassy import n_molecule_types
     gsh = mda.Universe(TPR, XTC).select_atoms('moltype GSH')
     assert n_molecule_types(gsh) == 1
@@ -115,11 +115,11 @@ def test_cli_molecule_types_warning(tmp_path, capsys):
     assert n_molecule_types(two.atoms) == 2
 
     # two molecule types in a PDB file with bonds (the molecules from the bonds), once each
-    two.atoms[gsh.n_atoms:].positions += 50 # apart: no overlap in -whole
+    two.atoms[gsh.n_atoms:].positions += 50 # apart: no overlap as one body
     pdb = str(tmp_path / 'two.pdb')
     two.atoms.write(pdb, bonds='all')
     out = str(tmp_path / 'x.xvg')
-    assert main(['-s', pdb, '-ndots', '240', '-whole', '-q', '-o', out]) == 0
+    assert main(['-s', pdb, '-ndots', '240', '-bodies', 'selection', '-q', '-o', out]) == 0
     assert 'WARNING' not in capsys.readouterr().err
     assert main(['-s', pdb, '-ndots', '240', '-q', '-o', out]) == 0
     err = capsys.readouterr().err
@@ -191,3 +191,22 @@ def test_xvg_quoted_labels(tmp_path):
     out = tmp_path / 'x.xvg'
     _write_xvg(out, np.arange(2.0), np.ones((1, 2)), ['name "SG"'], 'sassy')
     assert read_xvg(out)[1] == ["name 'SG'"]
+
+
+@pytest.mark.filterwarnings('ignore::UserWarning') # MDAnalysis writing and reading the PDB
+def test_cli_residue_bodies(tmp_path):
+    """-bodies residue: one column per residue, labelled <resname><resid>; -whole is gone."""
+    gsh = mda.Universe(TPR, XTC).select_atoms('moltype GSH')
+    three = mda.Merge(gsh, gsh, gsh)
+    three.residues.resids = [1, 2, 3]
+    for k in (1, 2):
+        three.residues[k].atoms.positions += [4.0 * k, 0, 0]
+    pdb = str(tmp_path / 'three.pdb')
+    three.atoms.write(pdb)
+    out = tmp_path / 'x.xvg'
+    assert main(['-s', pdb, '-ndots', '240', '-bodies', 'residue', '-total', '-q', '-o', str(out)]) == 0
+    data, legends = read_xvg(out)
+    assert legends == ['GSH1', 'GSH2', 'GSH3', 'total']
+    assert data[1] == pytest.approx(data[2], abs=1e-3) # copies, each on its own
+    with pytest.raises(SystemExit):
+        main(['-s', pdb, '-whole'])

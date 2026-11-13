@@ -68,7 +68,7 @@ def test_sasa_types(gsh_aa):
         sasa.get_molecule_sasa('GSH3')
     with pytest.raises(KeyError, match='types'):
         sasa.get_type_sasa('SOL')
-    whole = SASA(mixed(gsh_aa).atoms, ndots=240, per_molecule=False)
+    whole = SASA(mixed(gsh_aa).atoms, ndots=240, bodies='selection')
     assert whole.molecule_labels == ['selection'] and list(whole.types) == ['selection']
 
 
@@ -199,3 +199,47 @@ def test_plots_several_highlights(tmp_path, monkeypatch):
     # panels ordered by type: GSH1, GSH2, SOL1, SOL2
     assert marks['sasa_distribution_per_molecule.png'] == {1: [(h[0].sasa, h[0].label)], 2: [(h[1].sasa, h[1].label)]}
     assert marks['sasa_distribution_per_atom.png'] == {0: [(0.1, h[0].label)], 3: [(0.2, h[1].label)]}
+
+
+def test_residue_bodies(gsh_aa, tmp_path):
+    """
+    Every residue a body: a single-residue molecule as per molecule; the residues of one
+    molecule on their own (they do not bury each other), labelled <resname><resid>.
+    """
+    from sassy import residue_labels, residue_types
+    from test_environment import copies
+    single = SASA(gsh_aa, ndots=240, bodies='residue')
+    assert single.molecule_labels == ['GSH1'] and single.molecule_types == ['GSH']
+    assert np.allclose(single.run(stop=4), SASA(gsh_aa, ndots=240).run(stop=4), rtol=1e-12)
+
+    u = copies(gsh_aa, [0.0, 4.0, -4.0]) # three overlapping residues ...
+    u.residues.molnums = [0, 0, 0] # ... of one molecule
+    molecule = SASA(u.atoms, ndots=240)
+    assert molecule.n_molecules == 1
+    molecule.run(stop=4)
+    residues = SASA(u.atoms, ndots=240, bodies='residue')
+    assert residues.molecule_labels == ['GSH1', 'GSH2', 'GSH3'] and list(residues.types) == ['GSH']
+    residues.run(stop=4)
+    alone = SASA(gsh_aa, ndots=240).run(stop=4)[0]
+    assert np.allclose(residues.molecule_sasa, alone, rtol=1e-6) # each residue on its own
+    for k in range(3): # in the molecule, a residue is buried by the others
+        assert np.all(molecule.get_sasa(f'resid {k + 1}') < residues.molecule_sasa[k])
+    assert 'Residue 1 of 3 (GSH, resid 2, 36 atoms), on its own' in \
+        residues.write_surface(tmp_path / 'x.pdb', molecule='GSH2', return_surface=True).remarks
+
+    # duplicate resids: the segid, else a number; other atoms: another type
+    u.residues.resids = [1, 1, 1]
+    assert residue_labels(u.atoms) == ['GSH1', 'GSH1_2', 'GSH1_3']
+    u.segments.segids = ['A', 'B', 'C']
+    assert residue_labels(u.atoms) == ['GSH1:A', 'GSH1:B', 'GSH1:C']
+    u.atoms[2 * gsh_aa.n_atoms + 3].name = 'XX'
+    assert residue_types(u.atoms) == ['GSH', 'GSH', 'GSH_2']
+
+
+def test_bodies_argument(gsh_aa):
+    """The removed per_molecule keyword and unknown bodies are rejected."""
+    assert SASA(gsh_aa, ndots=240, bodies='selection').molecule_labels == ['selection']
+    with pytest.raises(TypeError, match='per_molecule'):
+        SASA(gsh_aa, per_molecule=False)
+    with pytest.raises(ValueError, match='bodies must be one of'):
+        SASA(gsh_aa, bodies='chain')

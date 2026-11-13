@@ -42,7 +42,9 @@ def test_save_plots_kinds(tmp_path):
     assert {f.name for f in save_plots(tmp_path / 'a', times, values, atoms=atoms, atom_labels=['S1', 'N1'])} == {
         'sasa_total.png', 'sasa_time.png', 'sasa_distribution.png', 'sasa_distribution_per_molecule.png',
         'sasa_distribution_per_atom.png'}
-    for kind in ('atom', 'residue'):
+    assert {f.name for f in save_plots(tmp_path / 'r', times, values, ['ALA1', 'GLY2'], kind='residue')} == {
+        'sasa_total.png', 'sasa_time.png', 'sasa_distribution.png', 'sasa_distribution_per_residue.png'}
+    for kind in ('atom', 'body'):
         with pytest.raises(ValueError, match='kind'):
             save_plots(tmp_path, times, values, kind=kind)
 
@@ -193,6 +195,6 @@ def test_cli_plots_surface(tmp_path, monkeypatch):
     assert main(run + ['-surface-frame', '1']) == 0
     assert seen[-1][0].sasa is None and seen[-1][0].series is None
     # whole: the selection
-    assert main(run + ['-whole']) == 0
+    assert main(run + ['-bodies', 'selection']) == 0
     assert seen[-1][0].series == 0 and seen[-1][0].sasa is not None
     assert (tmp_path / 'surf' / 'selection_sasa.pdb').is_file()

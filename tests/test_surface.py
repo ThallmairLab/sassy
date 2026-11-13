@@ -140,13 +140,14 @@ def test_surface_molecules(gsh_aa, tmp_path):
     # median frame of the chosen molecule
     assert single.write_surface(tmp_path / 'x.pdb', molecule=1, return_surface=True).frame in single.frames
 
-    whole = SASA(two, ndots=240, per_molecule=False)
+    whole = SASA(two, ndots=240, bodies='selection')
     both = whole.write_surface(tmp_path / 'x.pdb', frame=0, return_surface=True)
     assert both.atoms == two and both.area < 0.9 * 2 * alone
     assert 'Whole selection as one body (GSH, resid 1, 72 atoms)' in both.remarks
     assert second.remarks[2].startswith('Molecule 1 of 2 (GSH, resid 1, 36 atoms)')
-    with pytest.raises(ValueError, match='whole'):
+    with pytest.raises(IndexError, match='whole selection is one body'):
         whole.write_surface(tmp_path / 'x.pdb', frame=0, molecule=1)
+    assert whole.write_surface(tmp_path / 'x.pdb', frame=0, molecule='selection', return_surface=True).area == both.area
 
 
 def test_surface_pdb(gsh_aa, tmp_path):
@@ -192,7 +193,8 @@ def test_cli_surface(tmp_path, capsys):
     assert main(run + ['-surface', str(surf), '-surface-ref', reference]) == 0
     assert 'frame 100 is closest to the reference' in capsys.readouterr().err
 
-    for options, message in [(['-whole', '-surface-molecule', '0'], 'cannot be combined with -whole'),
+    for options, message in [(['-bodies', 'selection', '-surface-molecule', '0'],
+                              'cannot be combined with -bodies selection'),
                              (['-surface-molecule', 'SOL3'], 'no molecule of the selection'),
                              (['-surface-molecule', '5'], 'out of range'),
                              (['-surface-frame', '9999'], 'out of range for 501 frame(s)'),

@@ -1,5 +1,5 @@
 """
-Molecules of an AtomGroup: which atoms bury each other.
+Molecules and residues of an AtomGroup: which atoms bury each other.
 """
 import logging
 import numpy as np
@@ -130,21 +130,72 @@ def molecule_types(ag: mda.AtomGroup, molecules: np.ndarray | None = None) -> li
 		(n_molecules,) type names
 	'''
 	molecules = molecule_index(ag) if molecules is None else np.asarray(molecules)
-	n = int(molecules.max()) + 1 if len(molecules) else 0
 	if hasattr(ag.atoms, 'moltypes'):
 		first = np.unique(molecules, return_index=True)[1]
 		return [str(name) for name in ag.moltypes[first]]
+	return _signature_types(ag, molecules, 'molecule')
+
+def _signature_types(ag: mda.AtomGroup, index: np.ndarray, fallback: str) -> list[str]:
+	"""
+	Type name of every set of atoms of ``index`` (0, 1, ...): the residue name of its first
+	atom (``fallback`` without residue names), for sets with the same atom names and residue
+	names in the same order; different sets with the same first residue name are told
+	apart by a suffix (e.g. ALA, ALA_2).
+	"""
+	n = int(index.max()) + 1 if len(index) else 0
 	values = [getattr(ag, attr) for attr in ('names', 'resnames') if hasattr(ag.atoms, attr)]
 	resnames = ag.resnames if hasattr(ag.atoms, 'resnames') else None
 	names, signatures, bases = [], {}, {} # signature (names, resnames) -> type name; base -> count
-	for members in molecule_members(molecules, n):
+	for members in molecule_members(index, n):
 		signature = tuple(tuple(value[members].tolist()) for value in values)
 		if signature not in signatures:
-			base = str(resnames[members[0]]) if resnames is not None else 'molecule'
+			base = str(resnames[members[0]]) if resnames is not None else fallback
 			bases[base] = bases.get(base, 0) + 1
 			signatures[signature] = base if bases[base] == 1 else f"{base}_{bases[base]}"
 		names.append(signatures[signature])
 	return names
+
+
+def residue_index(ag: mda.AtomGroup) -> np.ndarray:
+	'''Residue index of every atom in ag, 0, 1, ... in the order in which the residues appear.'''
+	return _rank(ag.resindices) if ag.n_atoms else np.zeros(0, dtype=int)
+
+def residue_types(ag: mda.AtomGroup, residues: np.ndarray | None = None) -> list[str]:
+	'''
+	Type name of every residue (see :func:`residue_index`): its residue name, for residues
+	with the same atom names in the same order; residues of the same name with other atoms
+	(e.g. termini) are told apart by a suffix (ALA, ALA_2), so that all residues of a type
+	have the same atoms.
+	'''
+	residues = residue_index(ag) if residues is None else np.asarray(residues)
+	return _signature_types(ag, residues, 'residue')
+
+def residue_labels(ag: mda.AtomGroup, residues: np.ndarray | None = None) -> list[str]:
+	'''
+	Label of every residue (see :func:`residue_index`): ``<resname><resid>`` as in
+	:func:`atom_label` (e.g. ALA12); residues with the same label in different segments
+	(e.g. chains) get their segid appended (ALA12:A), and if that does not tell them apart,
+	a number (ALA12_2).
+	'''
+	residues = residue_index(ag) if residues is None else np.asarray(residues)
+	if not len(residues):
+		return []
+	first = ag[np.unique(residues, return_index=True)[1]] # first atom of every residue, in order
+	resnames = first.resnames if hasattr(ag.atoms, 'resnames') else [''] * len(first)
+	resids = first.resids if hasattr(ag.atoms, 'resids') else first.resindices + 1
+	labels = [f"{name}{resid}" for name, resid in zip(resnames, resids)]
+	if len(set(labels)) < len(labels) and hasattr(ag.atoms, 'segids'):
+		segids = {} # label -> the segids of the residues with that label
+		for label, segid in zip(labels, first.segids):
+			segids.setdefault(label, set()).add(segid)
+		# the segid only where it tells residues of the same label apart
+		labels = [f"{label}:{segid}" if len(segids[label]) > 1 and segid else label
+		          for label, segid in zip(labels, first.segids)]
+	seen, unique = {}, []
+	for label in labels:
+		seen[label] = seen.get(label, 0) + 1
+		unique.append(label if seen[label] == 1 else f"{label}_{seen[label]}")
+	return unique
 
 
 def atom_label(atom: mda.core.groups.Atom) -> str:

@@ -6,7 +6,8 @@ Uses a fast Shrake-Rupley algorithm on a [MDAnalysis](https://www.mdanalysis.org
 ## Installation
 
 ```bash
-git clone ...
+git clone https://github.com/ThallmairLab/sassy
+cd sassy
 pip install .     
 ```
 
@@ -23,6 +24,12 @@ u = mda.Universe("topol.tpr", "traj.xtc")
 sasa = SASA(u.select_atoms("moltype GSH"))  # initialize SASA object
 sasa.run(verbose=True)						# perform calculation with progress bar
 sasa.get_sasa("name S*")               		# (n_frames,) summed over the selection
+
+# a ligand covered by the protein: only the ligand's dots are computed
+ligand = SASA(u.select_atoms("resname LIG"), environment="protein", buried=True)
+ligand.run()
+ligand.total_sasa          # (n_frames,) SASA of the ligand left uncovered by the protein
+ligand.get_buried_sasa()   # (n_frames,) area of the ligand buried by the protein
 ```
 ### Command line
 
@@ -31,8 +38,37 @@ sasa.get_sasa("name S*")               		# (n_frames,) summed over the selection
 sassy -s topol.tpr -f traj.xtc -select "moltype GSH" -total -o sasa.xvg -plots plots
 
 # SASA of the whole selection (its molecules bury each other)
-sassy -s topol.tpr -f traj.xtc -select "resname GSH" -whole -o sasa.xvg -plots plots
+sassy -s topol.tpr -f traj.xtc -select "resname GSH" -bodies selection -o sasa.xvg -plots plots
+
+# one column per residue, each on its own
+sassy -s topol.tpr -f traj.xtc -select "protein" -bodies residue -o residues.xvg
+
+# a ligand covered by the protein, and the area the protein buries
+sassy -s topol.tpr -f traj.xtc -select "resname LIG" -env protein -buried -o ligand.xvg
 ```
+
+### What buries an atom
+
+Two independent settings decide which atoms bury the surface of an atom:
+
+| setting | values | meaning |
+|---|---|---|
+| bodies (`-bodies`, `bodies=`) | `molecule` (default) | every molecule on its own: other molecules do not bury it |
+| | `residue` | every residue on its own, labelled `<resname><resid>` (e.g. `ALA12`) |
+| | `selection` | the whole selection as one body: its molecules bury each other |
+| environment (`-env`, `environment=`) | a selection | atoms that bury every body without being counted (e.g. the protein around a ligand); every body is covered by the environment, not by the other bodies |
+
+One column is written per body. `-per-atom`, `-group` and `-total` choose other
+columns and work with any setting. With `-buried` (`buried=True`), the area buried by
+the environment (the SASA without minus with it) is added as columns labelled
+`<column> buried`.
+
+The environment atoms within reach of a body are taken in its periodic image, so the
+environment does not need to be whole; the bodies are assumed to be whole. Only the
+dots of the selection are computed, so a small ligand in a large protein is fast. The
+result equals `-select "protein or resname LIG" -bodies selection -group "resname LIG"`
+(and `gmx sasa -surface "Protein|LIG" -output LIG`), which computes the dots of every
+protein atom too.
 
 ### Surface dots
 
@@ -63,7 +99,9 @@ sassy -s topol.tpr -f traj.xtc -select "moltype GSH" -surface -surface-molecule 
 sassy -s cg.tpr -f cg.xtc -select "moltype GSH" -cg -surface cg -surface-ref mapped.pdb					  # clodest to reference structure
 ```
 
-Surfaces use fewer dots (`ndots` / `-surface-ndots`, default 240) than the SASA.
+Surfaces use fewer dots (`ndots` / `-surface-ndots`, default 240) than the SASA. With an
+environment, the dots cover only the part left uncovered, and the environment atoms
+within reach are written as chain B.
 
 ## Method
 
@@ -73,6 +111,6 @@ systems, a bead in coarse-grained ones (`cg=True`).
 - Every atom is a sphere of its van der Waals radius plus the probe radius
   (default 0.191 nm, a Martini tiny bead), covered with geodesic dots on the sphere.
 - A dot is exposed if it lies outside the probe-expanded spheres of all other
-  atoms in the respective selection.
+  atoms of its body and of the environment.
 - The area of an atom is 4πR² × (exposed dots / all dots).
 

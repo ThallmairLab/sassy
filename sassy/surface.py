@@ -16,6 +16,7 @@ from scipy.stats import gaussian_kde
 
 from .dots import unit_dots
 from .engine import _surface_dots, warn_coincident
+from .environment import box_nm, environment_copies
 from .groups import atom_label
 from .radii import PROBE_RADIUS, atom_radii, radii_remarks
 from .units import to_angstrom, to_nm
@@ -54,6 +55,11 @@ class Surface:
 		REMARK records of the written PDB file
 	molecule : int or None
 		index of the molecule in the :class:`SASA` (from :meth:`SASA.write_surface`), else None
+	environment : MDAnalysis.AtomGroup or None
+		the environment atoms within reach of the structure (see ``environment`` of
+		:func:`generate_surface`), which bury its surface; None without an environment
+	environment_positions : np.ndarray or None
+		(n_environment, 3) their positions (nm), in the periodic image of the structure
 	"""
 	atoms: mda.AtomGroup
 	positions: np.ndarray
@@ -65,12 +71,15 @@ class Surface:
 	rmsd: float | None = None
 	remarks: list[str] | None = None
 	molecule: int | None = None
+	environment: mda.AtomGroup | None = None
+	environment_positions: np.ndarray | None = None
 
 	def write(self, fname: str | Path) -> None:
 		"""
 		Write the structure and its dots to a PDB file: the atoms first as ATOM records
-		(chain A), then the dots as HETATM records (chain X) with atom name DOT and the
-		residue name and id of the atom they belong to.
+		(chain A), the environment atoms within reach (if any) as ATOM records (chain B),
+		then the dots as HETATM records (chain X) with atom name DOT and the residue name
+		and id of the atom they belong to.
 		"""
 		write_surface_pdb(fname, self)
 
@@ -78,7 +87,9 @@ class Surface:
 def generate_surface(atoms: mda.AtomGroup, radii: ArrayLike | None = None, probe: float = PROBE_RADIUS,
                      block: ArrayLike | None = None, frame: int | None = None,
                      reference: ArrayLike | mda.AtomGroup | None = None, frames: ArrayLike | None = None,
-                     ndots: int = SURFACE_DOTS, cg: bool = False, custom_radii: bool | None = None) -> Surface:
+                     ndots: int = SURFACE_DOTS, cg: bool = False, custom_radii: bool | None = None,
+                     environment: mda.AtomGroup | None = None,
+                     environment_radii: ArrayLike | None = None) -> Surface:
 	"""
 	Solvent accessible surface dots (Connolly-style dot surface) of ``atoms`` in one
 	frame of their trajectory.
@@ -110,6 +121,13 @@ def generate_surface(atoms: mda.AtomGroup, radii: ArrayLike | None = None, probe
 	custom_radii : bool, optional
 		whether ``radii`` are custom (not the defaults), for the REMARK records; default
 		True if ``radii`` are given
+	environment : MDAnalysis.AtomGroup, optional
+		atoms that bury the surface without getting dots themselves (e.g. the protein
+		around a ligand), taken in the periodic image of every block of ``atoms``; with a
+		``reference``, superposed together with the structure
+	environment_radii : np.ndarray, optional
+		(n_environment,) van der Waals radii (nm) of the environment; default
+		:func:`atom_radii`; atoms with radius 0 are ignored
 
 	Returns
 	-------
@@ -123,8 +141,17 @@ def generate_surface(atoms: mda.AtomGroup, radii: ArrayLike | None = None, probe
 	trajectory = atoms.universe.trajectory
 	current = trajectory.ts.frame
 
+	if environment is not None:
+		env_radii = atom_radii(environment, cg=cg) if environment_radii is None else np.asarray(environment_radii, float)
+		if env_radii.shape != (environment.n_atoms,):
+			raise ValueError(f"environment_radii must have one value per environment atom ({environment.n_atoms}), "
+			                 f"got shape {env_radii.shape}.")
+		environment, env_radii = environment[env_radii > 0], env_radii[env_radii > 0]
+	block = np.zeros(atoms.n_atoms, dtype=int) if block is None else np.asarray(block)
+
 	# select the frame and get the positions of the atoms
 	rmsd = None
+	env_atoms = env_positions = None
 	try:
 		if reference is not None: # select structure closest to the reference structure and superpose it onto it
 			reference = to_nm(reference.positions) if hasattr(reference, 'positions') else np.asarray(reference, dtype=float)
@@ -140,13 +167,34 @@ def generate_surface(atoms: mda.AtomGroup, radii: ArrayLike | None = None, probe
 		else: # select the given frame or fall back to current frame 
 			frame = current if frame is None else int(np.arange(trajectory.n_frames)[frame]) # IndexError
 			positions = to_nm(trajectory[frame].positions[atoms.indices])
-		time = float(trajectory[frame].time)
+		ts = trajectory[frame]
+		time = float(ts.time)
+		if environment is not None and environment.n_atoms and (radii > 0).any():
+			# the environment atoms within reach, in the periodic image of every block
+			original = to_nm(ts.positions[atoms.indices])
+			cutoff = radii.max() + env_radii.max() + 2 * probe
+			env_block, env_index, env_positions = environment_copies(
+				original, block, to_nm(ts.positions[environment.indices]), cutoff, box_nm(ts.dimensions))
+			env_atoms = environment[env_index]
+			if reference is not None: # the same superposition as the structure
+				centre, aligned_centre = original.mean(axis=0), positions.mean(axis=0)
+				rotation, _ = rotation_matrix(original - centre, positions - aligned_centre)
+				env_positions = (env_positions - centre) @ np.asarray(rotation).T + aligned_centre
 	finally:
 		trajectory[current] # leave the trajectory on the frame it was on
 
-	# generate dots
-	dots, owners, area, coincident = _surface_dots(positions, radii, probe=probe, ndots=ndots, block=block)
-	warn_coincident(coincident, label=lambda i: f"{atom_label(atoms[i])} (frame {frame})")
+	# generate dots (only of the atoms; the environment only buries them)
+	if env_atoms is not None:
+		n_atoms = atoms.n_atoms
+		dots, owners, area, coincident = _surface_dots(
+			np.vstack([positions, env_positions]), np.concatenate([radii, env_radii[env_index]]), probe=probe,
+			ndots=ndots, block=np.concatenate([block, env_block]),
+			target=np.arange(n_atoms + len(env_index)) < n_atoms)
+		label = lambda i: atom_label(atoms[i] if i < n_atoms else env_atoms[i - n_atoms])
+	else:
+		dots, owners, area, coincident = _surface_dots(positions, radii, probe=probe, ndots=ndots, block=block)
+		label = lambda i: atom_label(atoms[i])
+	warn_coincident(coincident, label=lambda i: f"{label(i)} (frame {frame})")
 
 	# write remarks for the PDB file
 	n_dots = len(unit_dots(int(ndots)))
@@ -154,9 +202,14 @@ def generate_surface(atoms: mda.AtomGroup, radii: ArrayLike | None = None, probe
 	           f"Frame {frame}, time {time:g} ps, SASA {area:.3f} nm^2, {n_dots} dots per atom"]
 	if rmsd is not None:
 		remarks.append(f"Superposed onto the reference structure, RMSD {rmsd:.3f} nm")
+	if environment is not None:
+		within = 0 if env_atoms is None else len(np.unique(env_atoms.indices))
+		remarks.append(f"Covered by an environment of {environment.n_atoms} atoms; the {within} within reach "
+		               f"as chain B (no dots)")
 	remarks += radii_remarks(atoms, cg=cg, custom=custom, probe=probe)
 	logger.debug("surface of frame %d: %d atoms, %d dots, SASA %.3f nm^2", frame, atoms.n_atoms, len(dots), area)
-	return Surface(atoms, positions, dots, owners, area, frame, time, rmsd, remarks)
+	return Surface(atoms, positions, dots, owners, area, frame, time, rmsd, remarks,
+	               environment=env_atoms, environment_positions=env_positions)
 
 
 def _version() -> str:
@@ -258,13 +311,22 @@ def write_surface_pdb(fname: str | Path, surface: Surface) -> None:
 	atoms = surface.atoms
 	n_atoms, n_dots = atoms.n_atoms, len(surface.dots)
 	resids = atoms.resids if hasattr(atoms, 'resids') else atoms.resindices + 1
+	env, env_positions = surface.environment, surface.environment_positions
+	if env is None:
+		env, env_positions = atoms[:0], np.zeros((0, 3))
+	else: # an atom within reach of several blocks once
+		_, first = np.unique(env.indices, return_index=True)
+		first = np.sort(first)
+		env, env_positions = env[first], env_positions[first]
+	n_env = env.n_atoms
+	env_resids = env.resids if hasattr(env, 'resids') else env.resindices + 1
 	_write_pdb(fname,
-	           positions=np.vstack([surface.positions, surface.dots]),
-	           names=np.concatenate([atoms.names, ['DOT'] * n_dots]),
-	           resnames=np.concatenate([atoms.resnames, atoms.resnames[surface.owners]]),
-	           resids=np.concatenate([resids, resids[surface.owners]]),
-	           chains=['A'] * n_atoms + ['X'] * n_dots,
-	           record_types=['ATOM'] * n_atoms + ['HETATM'] * n_dots,
+	           positions=np.vstack([surface.positions, env_positions, surface.dots]),
+	           names=np.concatenate([atoms.names, env.names, ['DOT'] * n_dots]),
+	           resnames=np.concatenate([atoms.resnames, env.resnames, atoms.resnames[surface.owners]]),
+	           resids=np.concatenate([resids, env_resids, resids[surface.owners]]),
+	           chains=['A'] * n_atoms + ['B'] * n_env + ['X'] * n_dots,
+	           record_types=['ATOM'] * (n_atoms + n_env) + ['HETATM'] * n_dots,
 	           remarks=surface.remarks or [])
 
 
