@@ -308,8 +308,8 @@ def test_keep_atoms(gsh_aa, tmp_path):
     assert light.results.atom_sasa is None and light.results.atom_labels is None
     assert np.array_equal(light.results.total_sasa, full.results.total_sasa)
     assert np.array_equal(light.results.body(0), molecules[0])
-    assert (light.write_surface(tmp_path / 'a.pdb', return_surface=True).frame
-            == full.write_surface(tmp_path / 'b.pdb', return_surface=True).frame)
+    assert (light.surface().frame
+            == full.surface().frame)
     with pytest.raises(RuntimeError, match='keep_atoms'):
         light.results.select('name S*')
     with pytest.raises(RuntimeError, match='keep_atoms'):
@@ -331,9 +331,9 @@ def test_representative_frame_range(gsh_aa):
     sasa = SASA(gsh_aa, ndots=240)
     sasa.run()
     n_frames = gsh_aa.universe.trajectory.n_frames
-    with pytest.raises(IndexError, match='out of range'):
-        sasa.representative('GSH', frame=n_frames)
-    assert sasa.representative('GSH', frame=-1)[1] == n_frames - 1
+    with pytest.raises(IndexError, match='out of bounds'):
+        sasa.surface(body_type='GSH', frame=n_frames)
+    assert sasa.surface(body_type='GSH', frame=-1).frame == n_frames - 1
 
 
 def test_sasa_coincident_warning(gsh_aa, caplog):

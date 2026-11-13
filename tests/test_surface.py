@@ -56,10 +56,10 @@ def test_surface_function(gsh_aa, tmp_path):
     gsh_aa.universe.trajectory[5]
     result = generate_surface(gsh_aa)
     assert result.frame == 5 and gsh_aa.universe.trajectory.ts.frame == 5
-    assert result.area == pytest.approx(SASA(gsh_aa, ndots=240).write_surface(tmp_path / 'x.pdb', frame=5, return_surface=True).area, rel=1e-12)
+    assert result.area == pytest.approx(SASA(gsh_aa, ndots=240).surface(frame=5).area, rel=1e-12)
     assert not any('Custom' in remark for remark in result.remarks)
     sasa = SASA(gsh_aa, ndots=240, radii={'S': 0.2})
-    custom = sasa.write_surface(tmp_path / 'x.pdb', frame=5, return_surface=True)
+    custom = sasa.surface(frame=5)
     assert 'Custom radii' in custom.remarks
     assert custom.area == pytest.approx(generate_surface(gsh_aa, radii=sasa.radii, frame=5).area)
     assert custom.area != pytest.approx(result.area)
@@ -73,24 +73,24 @@ def test_surface_area_and_frame(gsh_aa, tmp_path):
     """
     sasa = SASA(gsh_aa, ndots=240)
     with pytest.raises(RuntimeError, match='run'):
-        sasa.write_surface(tmp_path / 'x.pdb')
+        sasa.surface().write(tmp_path / 'x.pdb')
     series = sasa.run(step=2).body_sasa[0]
-    surface = sasa.write_surface(tmp_path / 'x.pdb', return_surface=True)
+    surface = sasa.surface()
     assert surface.frame == sasa.results.frames[closest_to(series)]
     assert surface.area == pytest.approx(series[closest_to(series)], rel=1e-6)
     assert any(r.startswith('Representative frame: SASA (') and 'closest to the median' in r for r in surface.remarks)
     # other statistics: names, functions and fixed values
     for statistic in ('mean', 'mode', 'q1', 'q3', 'max', 'mean-std', np.min, lambda v: np.percentile(v, 75), 6.3):
-        chosen = sasa.write_surface(tmp_path / 'x.pdb', statistic=statistic, return_surface=True)
+        chosen = sasa.surface(statistic=statistic)
         assert chosen.frame == sasa.results.frames[closest_to(series, statistic)]
-    assert 'max (' in sasa.write_surface(tmp_path / 'x.pdb', statistic='max', return_surface=True).remarks[3]
-    custom = sasa.write_surface(tmp_path / 'x.pdb', statistic=lambda v: v.max(), return_surface=True)
+    assert 'max (' in sasa.surface(statistic='max').remarks[3]
+    custom = sasa.surface(statistic=lambda v: v.max())
     assert 'custom statistic' in custom.remarks[3]
     # a given frame: no remark on the choice
     assert not any('Representative' in r for r in
-                   sasa.write_surface(tmp_path / 'x.pdb', frame=0, return_surface=True).remarks)
+                   sasa.surface(frame=0).remarks)
     with pytest.raises(ValueError, match='Unknown statistic'):
-        sasa.write_surface(tmp_path / 'x.pdb', statistic='average')
+        sasa.surface(statistic='average').write(tmp_path / 'x.pdb')
     assert surface.dots.shape[1] == 3 and len(surface.owners) == len(surface.dots)
     assert surface.atoms == gsh_aa
     # dots lie on the probe-expanded spheres of their atoms
@@ -98,11 +98,11 @@ def test_surface_area_and_frame(gsh_aa, tmp_path):
     assert np.allclose(distance, sasa.radii[surface.owners] + sasa.probe)
     # explicit frame (negative counts from the end), trajectory left where it was
     gsh_aa.universe.trajectory[3]
-    last = sasa.write_surface(tmp_path / 'x.pdb', frame=-1, return_surface=True)
+    last = sasa.surface(frame=-1)
     assert last.frame == gsh_aa.universe.trajectory.n_frames - 1
     assert gsh_aa.universe.trajectory.ts.frame == 3
     with pytest.raises(IndexError):
-        sasa.write_surface(tmp_path / 'x.pdb', frame=1000)
+        sasa.surface(frame=1000).write(tmp_path / 'x.pdb')
 
 
 def test_surface_reference(gsh_aa, tmp_path):
@@ -111,15 +111,15 @@ def test_surface_reference(gsh_aa, tmp_path):
     gsh_aa.universe.trajectory[7]
     rotation = rotation_matrix(1.2, [0, 1, 1])[:3, :3]
     reference = to_nm(gsh_aa.positions) @ rotation.T + [3.0, -0.4, 0.2] # nm
-    surface = sasa.write_surface(tmp_path / 'x.pdb', reference=reference, return_surface=True)
+    surface = sasa.surface(reference=reference)
     assert surface.frame == 7 and surface.rmsd == pytest.approx(0, abs=1e-5)
     assert np.allclose(surface.positions, reference, atol=1e-4)
     sasa.run(step=2) # then only the frames of the run: 7 is not among them
-    assert sasa.write_surface(tmp_path / 'x.pdb', reference=reference, return_surface=True).frame in sasa.results.frames
+    assert sasa.surface(reference=reference).frame in sasa.results.frames
     with pytest.raises(ValueError, match='not both'):
-        sasa.write_surface(tmp_path / 'x.pdb', frame=0, reference=reference)
+        sasa.surface(frame=0, reference=reference).write(tmp_path / 'x.pdb')
     with pytest.raises(ValueError, match='reference structure has'):
-        sasa.write_surface(tmp_path / 'x.pdb', reference=reference[:-1])
+        sasa.surface(reference=reference[:-1]).write(tmp_path / 'x.pdb')
 
 
 def test_surface_molecules(gsh_aa, tmp_path):
@@ -130,33 +130,33 @@ def test_surface_molecules(gsh_aa, tmp_path):
     two = two_molecules(gsh_aa, 4.0) # overlapping
     single = SASA(two, ndots=240)
     single.run(stop=3)
-    alone = SASA(gsh_aa, ndots=240).write_surface(tmp_path / 'x.pdb', frame=0, return_surface=True).area
-    first = single.write_surface(tmp_path / 'x.pdb', frame=0, return_surface=True)
+    alone = SASA(gsh_aa, ndots=240).surface(frame=0).area
+    first = single.surface(frame=0)
     assert first.atoms == two[:gsh_aa.n_atoms] and first.area == pytest.approx(alone, rel=1e-6)
-    second = single.write_surface(tmp_path / 'x.pdb', frame=0, body=1, return_surface=True)
+    second = single.surface(frame=0, body=1)
     assert second.atoms == two[gsh_aa.n_atoms:] and second.area == pytest.approx(alone, rel=1e-6)
     with pytest.raises(IndexError):
-        single.write_surface(tmp_path / 'x.pdb', frame=0, body=2)
+        single.surface(frame=0, body=2).write(tmp_path / 'x.pdb')
     # median frame of the chosen molecule
-    assert single.write_surface(tmp_path / 'x.pdb', body=1, return_surface=True).frame in single.results.frames
+    assert single.surface(body=1).frame in single.results.frames
 
     whole = SASA(two, ndots=240, bodies='selection')
-    both = whole.write_surface(tmp_path / 'x.pdb', frame=0, return_surface=True)
+    both = whole.surface(frame=0)
     assert both.atoms == two and both.area < 0.9 * 2 * alone
     assert 'Whole selection as one body (GSH, resid 1, 72 atoms)' in both.remarks
     assert second.remarks[2].startswith('Molecule 1 of 2 (GSH, resid 1, 36 atoms)')
     with pytest.raises(IndexError, match='whole selection is one body'):
-        whole.write_surface(tmp_path / 'x.pdb', frame=0, body=1)
-    assert whole.write_surface(tmp_path / 'x.pdb', frame=0, body='selection', return_surface=True).area == both.area
+        whole.surface(frame=0, body=1).write(tmp_path / 'x.pdb')
+    assert whole.surface(frame=0, body='selection').area == both.area
 
 
 def test_surface_pdb(gsh_aa, tmp_path):
     """Atoms as ATOM records, dots as HETATM records named DOT with the resname and resid of their atom."""
     sasa = SASA(gsh_aa, ndots=240)
     out = tmp_path / 'dots.pdb'
-    surface = sasa.write_surface(out, frame=4, return_surface=True)
+    surface = sasa.surface(frame=4)
     assert isinstance(surface, Surface)
-    assert sasa.write_surface(out, frame=4) is None # by default nothing is returned
+    assert sasa.surface(frame=4).write(out) is None # by default nothing is returned
     text = out.read_text()
     assert 'Frame 4' in text and 'Rowland & Taylor' in text
     assert 'Molecule 0 of 1 (GSH, resid 1, 36 atoms), on its own' in surface.remarks
@@ -195,7 +195,7 @@ def test_cli_surface(tmp_path, capsys):
 
     for options, message in [(['-bodies', 'selection', '-surface-body', '0'],
                               'cannot be combined with -bodies selection'),
-                             (['-surface-body', 'SOL3'], 'no body of the selection'),
+                             (['-surface-body', 'SOL3'], 'No body'),
                              (['-surface-body', '5'], 'out of range'),
                              (['-surface-frame', '9999'], 'out of range for 501 frame(s)'),
                              (['-surface', 'dots.pdb'], 'takes a directory')]:
@@ -219,3 +219,50 @@ def test_cli_surface(tmp_path, capsys):
     finally:
         os.chdir(cwd)
     assert (tmp_path / 'GSH_sasa.pdb').is_file()
+
+@pytest.mark.filterwarnings('ignore::UserWarning') # MDAnalysis reading the PDB/GRO
+def test_surface_formats_and_bfactors(gsh_aa, tmp_path, caplog, monkeypatch):
+    """
+    PDB: the B-factor of an atom and of its dots is the atom's SASA; GRO has the same records;
+    too many records for PDB give a warning; other extensions are rejected.
+    """
+    import logging
+    sasa = SASA(gsh_aa, ndots=240, keep_atoms=False)
+    surface = sasa.surface(frame=2)
+    assert surface.atom_sasa.sum() == pytest.approx(surface.area, rel=1e-10)
+    surface.write(tmp_path / 'x.pdb')
+    written = mda.Universe(str(tmp_path / 'x.pdb'))
+    atoms, dots = written.select_atoms('record_type ATOM'), written.select_atoms('name DOT')
+    assert np.allclose(atoms.tempfactors, surface.atom_sasa, atol=0.01) # PDB: 2 decimals
+    assert np.allclose(dots.tempfactors, surface.atom_sasa[surface.owners], atol=0.01)
+    surface.write(tmp_path / 'x.gro')
+    gro = mda.Universe(str(tmp_path / 'x.gro'))
+    assert gro.atoms.n_atoms == written.atoms.n_atoms
+    assert np.allclose(gro.atoms.positions, written.atoms.positions, atol=0.01)
+    with pytest.raises(ValueError, match='.pdb or .gro'):
+        surface.write(tmp_path / 'x.xyz')
+    big = sasa.surface(frame=2, ndots=25000) # ~118,000 records
+    monkeypatch.setattr(logging.getLogger('sassy'), 'propagate', True) # the CLI may have switched it off
+    with caplog.at_level(logging.WARNING, logger='sassy'):
+        big.write(tmp_path / 'big.pdb')
+    assert 'exceed what PDB can number' in caplog.text
+
+
+def test_representative_from_loaded(gsh_aa, tmp_path):
+    """The representative body and frame come from the results alone, also after loading them."""
+    from sassy import load
+    sasa = SASA(gsh_aa, ndots=240)
+    sasa.run()
+    sasa.save(tmp_path / 'x.npz')
+    loaded = load(tmp_path / 'x.npz').results
+    for statistic in ('median', 'max'):
+        assert loaded.representative('GSH', statistic) == sasa.results.representative('GSH', statistic)
+    assert sasa.surface(body_type='GSH').frame == loaded.representative('GSH')[1]
+
+
+def test_cli_surface_gro(tmp_path):
+    """-surface-ext gro writes DIR/<type>_sasa.gro."""
+    out = str(tmp_path / 'x.xvg')
+    assert main(['-s', TPR, '-f', XTC, '-select', 'moltype GSH', '-ndots', '240', '-skip', '100', '-o', out,
+                 '-q', '-surface', str(tmp_path / 'surf'), '-surface-ext', 'gro']) == 0
+    assert (tmp_path / 'surf' / 'GSH_sasa.gro').is_file()

@@ -48,7 +48,7 @@ DENSITY_LABEL = 'Probability Density'
 class Highlight:
 	"""
 	A frame to highlight in the plots by a red vertical line, e.g. that of the surface
-	(:meth:`SASA.write_surface`): at its time in the time plots and at its SASA in the
+	(:meth:`SASA.surface`): at its time in the time plots and at its SASA in the
 	distributions.
 
 	Attributes

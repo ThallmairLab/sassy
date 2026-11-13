@@ -160,7 +160,8 @@ def test_surface_with_environment(complex_, tmp_path):
     sasa = SASA(ligand, ndots=240, environment='resid 2 3')
     sasa.run()
     out = tmp_path / 'ligand.pdb'
-    surface = sasa.write_surface(out, frame=3, return_surface=True)
+    surface = sasa.surface(frame=3)
+    surface.write(out)
     assert surface.area == pytest.approx(sasa.results.body_sasa[0, 3], rel=1e-6)
     assert np.all(surface.owners < ligand.n_atoms)
     assert 0 < surface.environment.n_atoms <= 72
@@ -174,7 +175,7 @@ def test_surface_with_environment(complex_, tmp_path):
     complex_.trajectory[3]
     rotation = rotation_matrix(0.7, [1, 2, 3])[:3, :3]
     reference = (ligand.positions - ligand.center_of_geometry()) @ rotation.T + [5.0, -3.0, 2.0]
-    aligned = sasa.write_surface(out, reference=reference / 10, return_surface=True)
+    aligned = sasa.surface(reference=reference / 10)
     assert aligned.frame == 3
 
     def distances(s):

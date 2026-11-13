@@ -66,7 +66,7 @@ def test_sasa_types(gsh_aa):
     with pytest.raises(KeyError, match='GSH3'):
         sasa.results.body('GSH3')
     with pytest.raises(KeyError, match='No body type'):
-        sasa.representative('SOL')
+        sasa.results.representative('SOL')
     assert list(sasa.results.type_sasa()) == ['GSH', 'GSX'] and sasa.results.body_type_indices.keys() == sasa.body_type_indices.keys()
     whole = SASA(mixed(gsh_aa).atoms, ndots=240, bodies='selection')
     assert whole.body_labels == ['selection'] and list(whole.body_type_indices) == ['selection']
@@ -155,29 +155,29 @@ def test_surface_per_type(gsh_aa, tmp_path):
     for name in ('GSH', 'GSX'):
         values = sasa.results.type_sasa(per_body=True)[name]
         for statistic in ('median', 'mean', 'q3'):
-            molecule, frame, target = sasa.representative(name, statistic)
+            molecule, frame, target = sasa.results.representative(name, statistic)
             from sassy.surface import STATISTICS
             assert target == pytest.approx(STATISTICS[statistic](values.ravel()))
             column = np.flatnonzero(sasa.results.frames == frame)[0]
             assert molecule in sasa.body_type_indices[name]
             assert abs(sasa.results.body_sasa[molecule, column] - target) == pytest.approx(np.abs(values - target).min())
-    assert sasa.representative('GSH')[2] != pytest.approx(sasa.representative('GSX')[2]) # own medians
+    assert sasa.results.representative('GSH')[2] != pytest.approx(sasa.results.representative('GSX')[2]) # own medians
     # a fixed frame: only the molecule is chosen
     frame = int(sasa.results.frames[3])
-    molecule, chosen, target = sasa.representative('GSH', frame=frame)
+    molecule, chosen, target = sasa.results.representative('GSH', frame=frame)
     assert chosen == frame and molecule == [0, 2][np.argmin(np.abs(sasa.results.body_sasa[[0, 2], 3] - target))]
-    assert sasa.representative('GSH', frame=1)[:2] == (0, 1) # not analysed: the first molecule
+    assert sasa.results.representative('GSH', frame=1)[:2] == (0, 1) # not analysed: the first molecule
     # write_surface by type
-    surface = sasa.write_surface(tmp_path / 'GSX_sasa.pdb', body_type='GSX', return_surface=True)
-    assert surface.body == 1 and surface.frame == sasa.representative('GSX')[1]
+    surface = sasa.surface(body_type='GSX')
+    assert surface.body == 1 and surface.frame == sasa.results.representative('GSX')[1]
     assert any(r.startswith('Representative molecule and frame: GSX1 in frame') and
                '1 GSX molecule(s) x' in r for r in surface.remarks)
     # one molecule: its frame closest to the statistic of its type
     target = np.median(sasa.results.type_sasa(per_body=True)['GSH'])
-    surface = sasa.write_surface(tmp_path / 'x.pdb', body='GSH2', return_surface=True)
+    surface = sasa.surface(body='GSH2')
     assert surface.frame == sasa.results.frames[np.argmin(np.abs(sasa.results.body(2) - target))]
     with pytest.raises(KeyError):
-        sasa.write_surface(tmp_path / 'x.pdb', body_type='SOL')
+        sasa.surface(body_type='SOL').write(tmp_path / 'x.pdb')
 
 
 def test_plots_several_highlights(tmp_path, monkeypatch):
@@ -225,7 +225,7 @@ def test_residue_bodies(gsh_aa, tmp_path):
     for k in range(3): # in the molecule, a residue is buried by the others
         assert np.all(molecule.results.select(f'resid {k + 1}') < residues.results.body_sasa[k])
     assert 'Residue 1 of 3 (GSH, resid 2, 36 atoms), on its own' in \
-        residues.write_surface(tmp_path / 'x.pdb', body='GSH2', return_surface=True).remarks
+        residues.surface(body='GSH2').remarks
 
     # duplicate resids: the segid, else a number; other atoms: another type
     u.residues.resids = [1, 1, 1]

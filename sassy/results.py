@@ -2,7 +2,7 @@
 Results of a SASA calculation: the SASA (nm^2) of every body, of every atom and in
 total over the analysed frames, with their labels, and saving to / loading from npz.
 """
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
@@ -138,6 +138,50 @@ class Results:
 		"""
 		return {name: self.body_sasa[indices] if per_body else self.body_sasa[indices].sum(axis=0)
 		        for name, indices in self.body_type_indices.items()}
+
+	def representative(self, body_type: str, statistic: str | Callable[[np.ndarray], float] | float = 'median',
+	                   frame: int | None = None) -> tuple[int, int, float]:
+		"""
+		A representative body of a type and frame: the statistic is taken over the SASA
+		distribution of that type only (all its bodies in all analysed frames), and the
+		(body, frame) whose SASA is closest to it is chosen.
+
+		Parameters
+		----------
+		body_type : str
+			type (see :attr:`body_type_indices`)
+		statistic : str, callable or float
+			a name in :data:`STATISTICS` ('median', 'mean', 'mode', 'q1', 'q3', 'min', 'max',
+			'mean+std', 'mean-std'), a function of the SASA values (e.g.
+			``lambda sasa: np.percentile(sasa, 90)``), or a fixed SASA (nm^2)
+		frame : int, optional
+			fixed trajectory frame: only the body is chosen, the one closest to the statistic
+			in that frame (the first body of the type if the frame was not analysed)
+
+		Returns
+		-------
+		body : int
+			body index
+		frame : int
+			trajectory frame
+		target : float
+			the statistic (nm^2) of the type's distribution
+		"""
+		from .surface import _statistic # statistics live with the surfaces they choose
+		indices = self.body_type_indices
+		if body_type not in indices:
+			raise KeyError(f"No body type {body_type!r}; types: {', '.join(indices)}.")
+		function, _ = _statistic(statistic)
+		bodies = indices[body_type]
+		values = self.body_sasa[bodies] # (n_bodies_of_type, n_frames)
+		target = float(function(values.ravel()))
+		if frame is None:
+			k, column = np.unravel_index(np.argmin(np.abs(values - target)), values.shape)
+			return int(bodies[k]), int(self.frames[column]), target
+		analysed = np.flatnonzero(self.frames == frame)
+		if not len(analysed):
+			return int(bodies[0]), int(frame), target
+		return int(bodies[np.argmin(np.abs(values[:, analysed[0]] - target))]), int(frame), target
 
 	# atoms
 	def _atom_indices(self, selection: str | mda.AtomGroup | ArrayLike) -> np.ndarray:

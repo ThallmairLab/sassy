@@ -19,6 +19,7 @@ from .. import __version__
 from sassy.radii import PROBE_RADIUS
 from sassy.results import COLUMNS
 from sassy.groups import BODIES
+from sassy.results import body_index
 from sassy.sasa import N_DOTS, SASA
 from sassy.surface import STATISTICS, SURFACE_DOTS
 
@@ -156,15 +157,19 @@ def parser() -> argparse.ArgumentParser:
 	                   help='radius (nm) by element (bead size with cg), adds to or replaces the defaults; repeatable')
 
 	surf = p.add_argument_group('surface', 'structure and solvent accessible surface dots (Connolly-style '
-	                            'dot surface) of one frame as PDB: atoms as ATOM, dots as HETATM records named DOT with the residue of their atom')
+	                            'dot surface) of one frame as PDB or GRO: dots named DOT with the residue of their '
+	                            'atom; in PDB the B-factor is the SASA of the atom (nm^2)')
 	surf.add_argument('-surface', nargs='?', const='.', default=None, metavar='DIR',
-	                  help='write the surface of a representative body of every body type to DIR/<type>_sasa.pdb '
+	                  help='write the surface of a representative body of every body type to DIR/<type>_sasa.<ext> '
 	                       '(e.g. GSH_sasa.pdb; the current directory if no DIR is given); with -bodies selection '
 	                       'that of the whole selection (selection_sasa.pdb); with -env the environment atoms within '
 	                       'reach as chain B')
+	surf.add_argument('-surface-ext', choices=('pdb', 'gro'), default='pdb',
+	                  help='file format of the surfaces: pdb (chains, B-factors, at most 99,999 records) or gro '
+	                       '(no limit)')
 	surf.add_argument('-surface-body', default=None, metavar='BODY',
 	                  help='instead: only the surface of this body, by index (0 = first) or column label (e.g. '
-	                       'GSH2, ALA12), written to <label>_sasa.pdb')
+	                       'GSH2, ALA12), written to <label>_sasa.<ext>')
 	surf.add_argument('-surface-ndots', type=_positive_int, default=SURFACE_DOTS, help='minimum number of dots per atom of the surface')
 	
 	surface_frame = surf.add_mutually_exclusive_group()
@@ -206,45 +211,38 @@ def _table(sasa: SASA, args: argparse.Namespace) -> tuple[list[str], np.ndarray]
 	return labels, values
 
 
-def _surface_file(directory: str, name: str) -> Path:
-	"""DIR/<name>_sasa.pdb, with characters that do not belong in file names replaced."""
+def _surface_file(directory: str, name: str, extension: str = 'pdb') -> Path:
+	"""DIR/<name>_sasa.<extension>, with characters that do not belong in file names replaced."""
 	safe = ''.join(c if c.isalnum() or c in '-_.+' else '_' for c in name)
-	return Path(directory) / f"{safe}_sasa.pdb"
+	return Path(directory) / f"{safe}_sasa.{extension}"
 
 
-def _surface_options(args: argparse.Namespace, sasa: SASA) -> list[dict] | bool:
+def _surface_options(args: argparse.Namespace, sasa: SASA) -> list[tuple[Path, dict]] | bool:
 	"""
 	The surfaces of -surface: one per body type (its representative body), or the body of
-	-surface-body, as keyword arguments of :meth:`SASA.write_surface` with ``fname``;
-	checked before the (long) calculation. False (after logging the error) if invalid.
+	-surface-body, as (file, keyword arguments of :meth:`SASA.surface`); checked before the
+	(long) calculation. False (after logging the error) if invalid.
 	"""
-	if Path(args.surface).suffix.lower() == '.pdb':
-		logger.error("-surface takes a directory (the surfaces are written to DIR/<type>_sasa.pdb), got %s",
-		             args.surface)
+	if Path(args.surface).suffix.lower() in ('.pdb', '.gro'):
+		logger.error("-surface takes a directory (the surfaces are written to DIR/<type>_sasa.%s), got %s",
+		             args.surface_ext, args.surface)
 		return False
 	common = {'frame': args.surface_frame, 'statistic': args.surface_stat, 'ndots': args.surface_ndots}
 	if args.surface_body is not None:
 		if sasa.bodies == 'selection':
 			logger.error("-surface-body cannot be combined with -bodies selection (the selection is one body)")
 			return False
-		labels = sasa.body_labels
 		text = args.surface_body
-		if text.lstrip('-').isdigit():
-			body = int(text)
-			if not -len(labels) <= body < len(labels):
-				logger.error("-surface-body %d out of range for %d body(ies)", body, len(labels))
-				return False
-			body %= len(labels)
-		elif text in labels:
-			body = labels.index(text)
-		else:
-			logger.error("-surface-body %r is no body of the selection (labels %s)", text,
-			             ', '.join(labels[:5]) + (', ...' if len(labels) > 5 else ''))
+		try:
+			body = body_index(sasa.body_labels, int(text) if text.lstrip('-').isdigit() else text)
+		except (IndexError, KeyError) as error:
+			logger.error("-surface-body: %s", str(error).strip('"'))
 			return False
-		logger.debug("surface of body %d (%s)", body, labels[body])
-		jobs = [dict(common, body=body, fname=_surface_file(args.surface, labels[body]))]
+		logger.debug("surface of body %d (%s)", body, sasa.body_labels[body])
+		jobs = [(_surface_file(args.surface, sasa.body_labels[body], args.surface_ext), dict(common, body=body))]
 	else:
-		jobs = [dict(common, body_type=name, fname=_surface_file(args.surface, name)) for name in sasa.body_type_indices]
+		jobs = [(_surface_file(args.surface, name, args.surface_ext), dict(common, body_type=name))
+		        for name in sasa.body_type_indices]
 
 	if args.surface_ref is not None:
 		if len(jobs) > 1:
@@ -256,7 +254,7 @@ def _surface_options(args: argparse.Namespace, sasa: SASA) -> list[dict] | bool:
 		except Exception as error: # missing file, unknown format, ...
 			logger.error("cannot read the reference structure %s: %s", args.surface_ref, error)
 			return False
-		job = jobs[0]
+		_, job = jobs[0]
 		body = job['body'] if 'body' in job else int(sasa.body_type_indices[job['body_type']][0])
 		n_atoms = sasa.body_atoms(body).n_atoms
 		if reference.n_atoms != n_atoms:
@@ -383,11 +381,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 	status, highlights = 0, []
 	if surface is not None:
 		Path(args.surface).mkdir(parents=True, exist_ok=True)
-		for job in surface:
+		for fname, job in surface:
 			try:
-				result = sasa.write_surface(return_surface=True, **job)
+				result = sasa.surface(**job)
+				result.write(fname)
 			except (IndexError, KeyError, ValueError) as error: # e.g. frame out of range
-				logger.error("surface %s: %s", job['fname'], error)
+				logger.error("surface %s: %s", fname, error)
 				status = 1 # the other surfaces and the plots are still written
 			else:
 				highlights.append(_highlight(sasa, args, result))

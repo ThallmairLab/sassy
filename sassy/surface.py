@@ -30,7 +30,7 @@ SURFACE_DOTS = 240 # default minimum number of dots per atom of a written surfac
 class Surface:
 	"""
 	Solvent accessible surface dots of a structure, see :func:`generate_surface` and
-	:meth:`SASA.write_surface`.
+	:meth:`SASA.surface`.
 
 	Attributes
 	----------
@@ -44,6 +44,9 @@ class Surface:
 		(n_dots,) index in ``atoms`` of the atom every dot belongs to
 	area : float
 		SASA (nm^2) estimated from the dots
+	atom_sasa : np.ndarray
+		(n_atoms,) SASA (nm^2) of every atom estimated from its dots; written as the
+		B-factor of its atom and of its dots
 	frame : int
 		trajectory frame of the structure
 	time : float
@@ -54,7 +57,7 @@ class Surface:
 	remarks : list of str
 		REMARK records of the written PDB file
 	body : int or None
-		index of the body in the :class:`SASA` (from :meth:`SASA.write_surface`), else None
+		index of the body in the :class:`SASA` (from :meth:`SASA.surface`), else None
 	environment : MDAnalysis.AtomGroup or None
 		the environment atoms within reach of the structure (see ``environment`` of
 		:func:`generate_surface`), which bury its surface; None without an environment
@@ -66,6 +69,7 @@ class Surface:
 	dots: np.ndarray
 	owners: np.ndarray
 	area: float
+	atom_sasa: np.ndarray
 	frame: int
 	time: float
 	rmsd: float | None = None
@@ -76,20 +80,25 @@ class Surface:
 
 	def write(self, fname: str | Path) -> None:
 		"""
-		Write the structure and its dots to a PDB file: the atoms first as ATOM records
-		(chain A), the environment atoms within reach (if any) as ATOM records (chain B),
-		then the dots as HETATM records (chain X) with atom name DOT and the residue name
-		and id of the atom they belong to.
+		Write the structure and its dots, as PDB (``.pdb``) or GRO (``.gro``, by extension):
+		the atoms first (chain A), the environment atoms within reach (if any, chain B), then
+		the dots (chain X) with atom name DOT and the residue name and id of the atom they
+		belong to. In PDB, atoms are ATOM and dots HETATM records, and the B-factor of an atom
+		and of its dots is the atom's SASA (nm^2), e.g. to colour by exposure; with the
+		remarks. GRO has neither chains, record types nor B-factors, but no limit of 99,999
+		records (PDB warns above it).
 		"""
-		write_surface_pdb(fname, self)
+		write_surface_file(fname, self)
+		logger.info("wrote %d atoms and %d dots (frame %d) to %s", self.atoms.n_atoms, len(self.dots),
+		            self.frame, fname)
 
 
 def generate_surface(atoms: mda.AtomGroup, radii: ArrayLike | None = None, probe: float = PROBE_RADIUS,
                      block: ArrayLike | None = None, frame: int | None = None,
                      reference: ArrayLike | mda.AtomGroup | None = None, frames: ArrayLike | None = None,
-                     ndots: int = SURFACE_DOTS, cg: bool = False, custom_radii: bool | None = None,
-                     environment: mda.AtomGroup | None = None,
-                     environment_radii: ArrayLike | None = None) -> Surface:
+                     ndots: int = SURFACE_DOTS, cg: bool = False, environment: mda.AtomGroup | None = None,
+                     environment_radii: ArrayLike | None = None, remarks: list[str] | None = None,
+                     body: int | None = None) -> Surface:
 	"""
 	Solvent accessible surface dots (Connolly-style dot surface) of ``atoms`` in one
 	frame of their trajectory.
@@ -117,10 +126,7 @@ def generate_surface(atoms: mda.AtomGroup, radii: ArrayLike | None = None, probe
 	ndots : int
 		minimum number of dots per atom
 	cg : bool
-		Martini CG radii (default radii, and the REMARK records)
-	custom_radii : bool, optional
-		whether ``radii`` are custom (not the defaults), for the REMARK records; default
-		True if ``radii`` are given
+		Martini CG radii (the default radii of ``atoms`` and the environment)
 	environment : MDAnalysis.AtomGroup, optional
 		atoms that bury the surface without getting dots themselves (e.g. the protein
 		around a ligand), taken in the periodic image of every block of ``atoms``; with a
@@ -128,6 +134,11 @@ def generate_surface(atoms: mda.AtomGroup, radii: ArrayLike | None = None, probe
 	environment_radii : np.ndarray, optional
 		(n_environment,) van der Waals radii (nm) of the environment; default
 		:func:`atom_radii`; atoms with radius 0 are ignored
+	remarks : list of str, optional
+		REMARK records after the frame (e.g. what the structure is, how its frame was
+		chosen, the radii); default the radii (see :func:`radii_remarks`)
+	body : int, optional
+		index of the body in a :class:`SASA`, kept in :attr:`Surface.body`
 
 	Returns
 	-------
@@ -136,7 +147,8 @@ def generate_surface(atoms: mda.AtomGroup, radii: ArrayLike | None = None, probe
 	"""
 	if frame is not None and reference is not None:
 		raise ValueError("Give either a frame or a reference structure, not both.")
-	custom = radii is not None if custom_radii is None else custom_radii
+	if remarks is None:
+		remarks = radii_remarks(atoms, cg=cg, custom=radii is not None, probe=probe)
 	radii = atom_radii(atoms, cg=cg) if radii is None else np.asarray(radii, dtype=float)
 	trajectory = atoms.universe.trajectory
 	current = trajectory.ts.frame
@@ -159,7 +171,7 @@ def generate_surface(atoms: mda.AtomGroup, radii: ArrayLike | None = None, probe
 				raise ValueError(f"The reference structure has {len(reference)} atoms, but the surface has "
 				                 f"{atoms.n_atoms}; select one molecule with a matching reference.")
 			frames = np.arange(trajectory.n_frames) if frames is None else np.asarray(frames)
-			coordinates = np.array([to_nm(trajectory[f].positions[atoms.indices]) for f in frames])
+			coordinates = (to_nm(trajectory[f].positions[atoms.indices]) for f in frames) # one frame at a time
 			best, positions, rmsd = best_matching_frame(coordinates, reference)
 			frame = int(frames[best])
 			logger.info("frame %d is closest to the reference structure (RMSD %.3f nm), superposed onto it",
@@ -195,21 +207,24 @@ def generate_surface(atoms: mda.AtomGroup, radii: ArrayLike | None = None, probe
 		dots, owners, area, coincident = _surface_dots(positions, radii, probe=probe, ndots=ndots, block=block)
 		label = lambda i: atom_label(atoms[i])
 	warn_coincident(coincident, label=lambda i: f"{label(i)} (frame {frame})")
-
-	# write remarks for the PDB file
 	n_dots = len(unit_dots(int(ndots)))
-	remarks = [f"Structure (ATOM) and solvent accessible surface dots (HETATM), sassy {_version()}",
-	           f"Frame {frame}, time {time:g} ps, SASA {area:.3f} nm^2, {n_dots} dots per atom"]
+	atom_sasa = np.bincount(owners, minlength=atoms.n_atoms) * 4 * np.pi * (radii + probe)**2 / n_dots
+	atom_sasa[radii <= 0] = 0.0
+
+	# remarks of the written file
+	header = [f"Structure (ATOM) and solvent accessible surface dots (HETATM; B-factor: SASA of the atom in "
+	          f"nm^2), sassy {_version()}",
+	          f"Frame {frame}, time {time:g} ps, SASA {area:.3f} nm^2, {n_dots} dots per atom"]
 	if rmsd is not None:
-		remarks.append(f"Superposed onto the reference structure, RMSD {rmsd:.3f} nm")
+		header.append(f"Superposed onto the reference structure, RMSD {rmsd:.3f} nm")
 	if environment is not None:
 		within = 0 if env_atoms is None else len(np.unique(env_atoms.indices))
-		remarks.append(f"Covered by an environment of {environment.n_atoms} atoms; the {within} within reach "
-		               f"as chain B (no dots)")
-	remarks += radii_remarks(atoms, cg=cg, custom=custom, probe=probe)
+		header.append(f"Covered by an environment of {environment.n_atoms} atoms; the {within} within reach "
+		              f"as chain B (no dots)")
 	logger.debug("surface of frame %d: %d atoms, %d dots, SASA %.3f nm^2", frame, atoms.n_atoms, len(dots), area)
-	return Surface(atoms, positions, dots, owners, area, frame, time, rmsd, remarks,
-	               environment=env_atoms, environment_positions=env_positions)
+	return Surface(atoms, positions, dots, owners, area, atom_sasa, frame, time, rmsd,
+	               header[:2] + list(remarks) + header[2:], body=body, environment=env_atoms,
+	               environment_positions=env_positions)
 
 
 def _version() -> str:
@@ -279,9 +294,9 @@ def closest_to(values: ArrayLike, statistic: str | Callable[[np.ndarray], float]
 
 def best_matching_frame(positions: ArrayLike, reference: ArrayLike) -> tuple[int, np.ndarray, float]:
 	"""
-	Frame of ``positions`` (n_frames, n_atoms, 3) with the lowest RMSD to
-	``reference`` (n_atoms, 3) after optimal superposition, and that frame
-	superposed onto the reference.
+	Frame of ``positions`` (n_frames, n_atoms, 3), or an iterable of (n_atoms, 3) positions
+	(e.g. read frame by frame), with the lowest RMSD to ``reference`` (n_atoms, 3) after
+	optimal superposition, and that frame superposed onto the reference.
 
 	Returns
 	-------
@@ -306,8 +321,10 @@ def best_matching_frame(positions: ArrayLike, reference: ArrayLike) -> tuple[int
 	return frame, aligned, float(rmsd)
 
 
-def write_surface_pdb(fname: str | Path, surface: Surface) -> None:
-	"""Write a :class:`Surface` as a PDB file, see :meth:`Surface.write`."""
+PDB_MAX_RECORDS, PDB_MAX_RESIDUES = 99_999, 9_999 # what the fixed-width PDB format can number
+
+def write_surface_file(fname: str | Path, surface: Surface) -> None:
+	"""Write a :class:`Surface` as PDB or GRO (by the extension of ``fname``), see :meth:`Surface.write`."""
 	atoms = surface.atoms
 	n_atoms, n_dots = atoms.n_atoms, len(surface.dots)
 	resids = atoms.resids if hasattr(atoms, 'resids') else atoms.resindices + 1
@@ -320,19 +337,23 @@ def write_surface_pdb(fname: str | Path, surface: Surface) -> None:
 		env, env_positions = env[first], env_positions[first]
 	n_env = env.n_atoms
 	env_resids = env.resids if hasattr(env, 'resids') else env.resindices + 1
-	_write_pdb(fname,
+	_write_records(fname,
 	           positions=np.vstack([surface.positions, env_positions, surface.dots]),
 	           names=np.concatenate([atoms.names, env.names, ['DOT'] * n_dots]),
 	           resnames=np.concatenate([atoms.resnames, env.resnames, atoms.resnames[surface.owners]]),
 	           resids=np.concatenate([resids, env_resids, resids[surface.owners]]),
 	           chains=['A'] * n_atoms + ['B'] * n_env + ['X'] * n_dots,
 	           record_types=['ATOM'] * (n_atoms + n_env) + ['HETATM'] * n_dots,
+	           tempfactors=np.concatenate([surface.atom_sasa, np.zeros(n_env), surface.atom_sasa[surface.owners]]),
 	           remarks=surface.remarks or [])
 
 
-def _write_pdb(fname: str | Path, positions: np.ndarray, names, resnames, resids, chains,
-               record_types, remarks: list[str]) -> None:
-	"""Write per-record arrays as a PDB file with MDAnalysis. Positions are in nm."""
+def _write_records(fname: str | Path, positions: np.ndarray, names, resnames, resids, chains,
+                   record_types, tempfactors, remarks: list[str]) -> None:
+	"""Write per-record arrays as a PDB or GRO file (by extension) with MDAnalysis. Positions are in nm."""
+	extension = Path(fname).suffix.lower()
+	if extension not in ('.pdb', '.gro'):
+		raise ValueError(f"Surfaces are written as .pdb or .gro, got {fname}.")
 	n_records = len(positions)
 	# one residue per consecutive (chain, resid, resname) block
 	resindex, res_keys = [], {}
@@ -350,13 +371,18 @@ def _write_pdb(fname: str | Path, positions: np.ndarray, names, resnames, resids
 	universe.add_TopologyAttr('icodes', [''] * len(res_keys))
 	universe.add_TopologyAttr('segids', [''])
 	universe.add_TopologyAttr('occupancies', np.ones(n_records))
-	universe.add_TopologyAttr('tempfactors', np.zeros(n_records))
+	universe.add_TopologyAttr('tempfactors', np.asarray(tempfactors, dtype=float))
 	universe.add_TopologyAttr('elements', [''] * n_records)
 	universe.add_TopologyAttr('formalcharges', np.zeros(n_records, dtype=int))
 	universe.atoms.positions = to_angstrom(positions) # MDAnalysis writes Å
 	universe.trajectory.remarks = list(remarks)
+	if extension == '.pdb' and (n_records > PDB_MAX_RECORDS or len(res_keys) > PDB_MAX_RESIDUES):
+		logger.warning("%s: %d records and %d residues exceed what PDB can number (%d, %d): serials and "
+		               "resids wrap; write .gro instead, or fewer dots (ndots) or atoms", fname, n_records,
+		               len(res_keys), PDB_MAX_RECORDS, PDB_MAX_RESIDUES)
 	with warnings.catch_warnings():
-		# a (superposed) molecule has no meaningful box: the unitary CRYST1 record is intended
+		# a (superposed) molecule has no meaningful box: the unitary/zero box is intended
 		warnings.filterwarnings('ignore', message='Unit cell dimensions not found')
+		warnings.filterwarnings('ignore', message='.*[Bb]ox.*')
 		with mda.Writer(str(fname), n_atoms=n_records) as writer:
 			writer.write(universe.atoms)

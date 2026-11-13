@@ -15,7 +15,7 @@ from .dots import unit_dots
 from .engine import _exposed_counts, warn_coincident
 from .environment import box_nm, environment_copies
 from .groups import BODIES, Bodies, atom_label, members, partition, body_type_indices
-from .radii import PROBE_RADIUS, atom_radii
+from .radii import PROBE_RADIUS, atom_radii, radii_remarks
 from .results import Results, _difference, body_index, save
 from .units import to_nm
 from .surface import SURFACE_DOTS, Surface, _statistic, generate_surface
@@ -87,7 +87,7 @@ class SASA:
 	>>> res.body_sasa, res.body_labels # (n_bodies, n_frames) nm^2, ['GSH1', 'GSH2', ...]
 	>>> res.total_sasa            # (n_frames,)
 	>>> res.select('name S*')     # (n_frames,) SASA of the sulfur atoms
-	>>> sasa.write_surface('dots.pdb', body='GSH1')  # structure + surface dots of a median-SASA frame
+	>>> sasa.surface('GSH1').write('dots.pdb')  # structure + surface dots of a median-SASA frame
 	>>> ligand = SASA(universe.select_atoms('resname LIG'), environment='protein', buried=True)
 	>>> ligand.run().total_sasa   # SASA of the ligand left uncovered by the protein
 	>>> ligand.buried.total_sasa  # area of the ligand buried by the protein
@@ -463,86 +463,33 @@ class SASA:
 			text += f"; covered by an environment of {self.environment.n_atoms} atoms"
 		return text
 
-	def representative(self, body_type: str, statistic: str | Callable[[np.ndarray], float] | float = 'median',
-	                   frame: int | None = None) -> tuple[int, int, float]:
+	def surface(self, body: int | str = 0, frame: int | None = None,
+	            reference: ArrayLike | mda.AtomGroup | None = None, ndots: int = SURFACE_DOTS,
+	            body_type: str | None = None,
+	            statistic: str | Callable[[np.ndarray], float] | float = 'median') -> Surface:
 		"""
-		A representative body of a type and frame: the statistic is taken over the SASA
-		distribution of that type only (all its bodies in all analysed frames of the last
-		:meth:`run`), and the (body, frame) whose SASA is closest to it is chosen.
-
-		Parameters
-		----------
-		body_type : str
-			type (see :attr:`types`)
-		statistic : str, callable or float
-			see :meth:`write_surface`
-		frame : int, optional
-			fixed trajectory frame (negative counts from the end): only the body is chosen
-			(the first of the type if the frame was not analysed); IndexError if out of range
-
-		Returns
-		-------
-		body : int
-			body index
-		frame : int
-			trajectory frame
-		target : float
-			the statistic (nm^2) of the type's distribution
-		"""
-		results = self._check_run()
-		if body_type not in self.body_type_indices:
-			raise KeyError(f"No body type {body_type!r}; types: {', '.join(self.body_type_indices)}.")
-		function, _ = _statistic(statistic)
-		bodies = self.body_type_indices[body_type]
-		values = results.body_sasa[bodies] # (n_bodies_of_type, n_frames)
-		target = float(function(values.ravel()))
-		if frame is None:
-			k, column = np.unravel_index(np.argmin(np.abs(values - target)), values.shape)
-			return int(bodies[k]), int(results.frames[column]), target
-		n_frames = self.ag.universe.trajectory.n_frames
-		if not -n_frames <= frame < n_frames:
-			raise IndexError(f"Frame {frame} out of range for {n_frames} frame(s).")
-		frame = int(frame) % n_frames
-		analysed = np.flatnonzero(results.frames == frame)
-		if not len(analysed):
-			return int(bodies[0]), frame, target
-		return int(bodies[np.argmin(np.abs(values[:, analysed[0]] - target))]), frame, target
-
-	def write_surface(self, fname: str, frame: int | None = None, body: int | str = 0,
-	                  reference: ArrayLike | mda.AtomGroup | None = None,
-	                  ndots: int = SURFACE_DOTS, return_surface: bool = False,
-	                  statistic: str | Callable[[np.ndarray], float] | float = 'median',
-	                  body_type: str | None = None) -> Surface | None:
-		"""
-		Write the structure and its solvent accessible surface dots (Connolly-style dot
-		surface) in one frame to a PDB file, with the radii and probe of this SASA; see
-		:func:`generate_surface` and :meth:`Surface.write` (format).
+		The structure and its solvent accessible surface dots (Connolly-style dot surface) in
+		one frame, with the radii and probe of this SASA; write it with :meth:`Surface.write`
+		(PDB or GRO), see :func:`generate_surface`.
 
 		The surface is that of one body (see ``bodies``): a molecule or residue on its own,
 		or the whole AtomGroup with ``bodies='selection'``. With an environment, only the
-		part left uncovered by it; the environment atoms within reach are written too
-		(chain B).
+		part left uncovered by it; the environment atoms within reach are kept too.
 
 		Statistics are taken over the SASA distribution of the body's type only (all
 		bodies of the type in all analysed frames; with ``bodies='selection'``: the total),
-		so every type has its own median, mean, ...
+		so every type has its own median, mean, ... (see :meth:`Results.representative`).
 
 		Parameters
 		----------
-		fname : str
-			PDB file to write
-		frame : int, optional
-			trajectory frame (negative counts from the end); default the analysed frame of the
-			body whose SASA is closest to ``statistic`` (by default the median) of its
-			type's distribution, i.e. a representative structure
 		body : int or str
 			index of the body (negative counts from the end) or its label (e.g. 'GSH2'),
 			default the first; with ``bodies='selection'`` the whole AtomGroup is the only
 			body (0, 'selection')
-		body_type : str, optional
-			instead of ``body``: a type (see :attr:`types`); its representative body and
-			frame are used, see :meth:`representative` (with ``frame``: the body closest to
-			the statistic in that frame; with ``reference``: its first body)
+		frame : int, optional
+			trajectory frame (negative counts from the end); default the analysed frame of the
+			body whose SASA is closest to ``statistic`` (by default the median) of its
+			type's distribution, i.e. a representative structure
 		reference : np.ndarray or MDAnalysis.AtomGroup, optional
 			reference structure, (n_atoms, 3) positions (nm) or an AtomGroup with as many
 			atoms as the surface (in the same order, e.g. a mapped atomistic structure for
@@ -551,30 +498,38 @@ class SASA:
 			that both surfaces share one coordinate frame
 		ndots : int
 			minimum number of dots per atom (fewer than for the SASA, as dots are for viewing)
+		body_type : str, optional
+			instead of ``body``: a type (see :attr:`body_type_indices`); its representative
+			body and frame (with ``frame``: the body closest to the statistic in that frame;
+			with ``reference``: its first body)
 		statistic : str, callable or float
 			without ``frame`` and ``reference``: the representative frame is the one whose SASA
 			is closest to this statistic of the type's SASA distribution: a name ('median',
 			'mean', 'mode' (most probable SASA), 'q1', 'q3' (quartiles), 'min', 'max',
 			'mean+std', 'mean-std', see :data:`STATISTICS`), a function of the SASA values
 			(e.g. ``lambda sasa: np.percentile(sasa, 90)``), or a fixed SASA (nm^2)
-		return_surface : bool
-			return the written :class:`Surface` (structure, dots, area in nm^2 from the
-			dots, frame, ...) instead of None
 
 		Returns
 		-------
-		Surface or None
-			the written surface with ``return_surface``, else None
+		Surface
+			structure, dots, area (nm^2, from the dots), frame, ...
+
+		Examples
+		--------
+		>>> sasa.surface(body_type='GSH').write('GSH_sasa.pdb')  # representative GSH and frame
+		>>> sasa.surface('GSH2', frame=-1).write('last.gro')
 		"""
 		function, name = _statistic(statistic) # checked also when not used
-		chosen = None # remark on how the frame was chosen
+		if frame is not None: # negative counts from the end; IndexError if out of range
+			frame = int(np.arange(self.ag.universe.trajectory.n_frames)[frame])
+		chosen = None # remark on how the frame (and body) was chosen
 		if body_type is not None:
 			if body_type not in self.body_type_indices:
 				raise KeyError(f"No body type {body_type!r}; types: {', '.join(self.body_type_indices)}.")
 			if reference is not None:
 				body = int(self.body_type_indices[body_type][0])
 			else:
-				body, frame, target = self.representative(body_type, function, frame)
+				body, frame, target = self._check_run().representative(body_type, function, frame)
 				chosen = self._chosen_remark(body, frame, target, name, body_choice=True)
 		else:
 			body = self.body_index(body)
@@ -585,20 +540,17 @@ class SASA:
 				chosen = self._chosen_remark(body, frame, target, name)
 		atoms = self.body_atoms(body) # bodies='selection': all of ag
 		indices = self._lookup[atoms.indices]
+		remarks = [self._body_remark(atoms, body)] + ([chosen] if chosen else [])
+		remarks += radii_remarks(atoms, cg=self.cg, custom=self._custom_radii, probe=self.probe)
 		environment = {} if self.environment is None else {'environment': self.environment,
 		                                                   'environment_radii': self._env_radii}
-		result = generate_surface(atoms, radii=self.radii[indices], custom_radii=self._custom_radii,
-		                          probe=self.probe, block=self._body_of_atom[indices], frame=frame,
-		                          reference=reference, frames=None if self.results is None else self.results.frames,
-		                          ndots=ndots, cg=self.cg, **environment)
-		result.remarks.insert(2, self._body_remark(atoms, body)) # after the frame
-		if chosen is not None:
-			result.remarks.insert(3, chosen)
-		result.body = body
-		result.write(fname)
-		logger.info("wrote the surface of %s in frame %d (%d atoms, %d dots, SASA %.3f nm^2) to %s",
-		            self.body_labels[body], result.frame, result.atoms.n_atoms, len(result.dots), result.area, fname)
-		return result if return_surface else None
+		surface = generate_surface(atoms, radii=self.radii[indices], probe=self.probe,
+		                           block=self._body_of_atom[indices], frame=frame, reference=reference,
+		                           frames=None if self.results is None else self.results.frames, ndots=ndots,
+		                           cg=self.cg, remarks=remarks, body=body, **environment)
+		logger.info("surface of %s in frame %d: %d atoms, %d dots, SASA %.3f nm^2", self.body_labels[body],
+		            surface.frame, surface.atoms.n_atoms, len(surface.dots), surface.area)
+		return surface
 
 	def _chosen_remark(self, body: int, frame: int, target: float, name: str, body_choice: bool = False) -> str:
 		"""REMARK on how the frame (and body) of a surface was chosen; also logged."""
