@@ -86,12 +86,34 @@ are `Results` objects too, with the same attributes and methods:
 | every body type | `.type_sasa()` {type: (n_frames,)}, `.body_type_labels` | `types` |
 | every atom | `.atom_sasa` (n_atoms, n_frames), `.atom_labels` (needs `keep_atoms`) | `atoms` |
 | a selection of atoms | `.select("name S*")` (needs `keep_atoms`) | `-group "name S*"` |
+| groups of atoms, may share atoms | `.group_sasa` (n_groups, n_frames), `.group_labels` (from `SASA(groups=...)`); `.group([...])` (needs `keep_atoms`) | |
 | times, frames | `.times` (ps), `.frames` | first column of the xvg |
 
 `-columns` takes several levels, in the order given (e.g. `-columns bodies total types`),
 and `-group` adds group columns after them; with `-buried` the same columns of the
 buried area follow, labelled `<column> buried`. `res.table(["bodies", "total"],
 groups=["name S*"])` gives the same table in Python.
+
+#### Groups of atoms
+
+To get the SASA of groups of atoms, e.g. the beads of a coarse-grained mapping or functional groups,
+pass them to `SASA`. Groups may share atoms. By default an atom in k groups gives 1/k of its SASA
+to each group (`share="equal"`), so the groups add up; with `share="full"` it gives all of it to
+each. The groups are summed while the trajectory is read, so the SASA of every atom need not be kept:
+
+```python
+beads = {"B1": "name C1 C2 C3", "B2": "name C3 C4 C5", "B3": "name O1 C6"}   # C3 is shared
+sasa = SASA(u.select_atoms("moltype LIG"), groups=beads, keep_atoms=False)
+res = sasa.run()
+res.group_sasa, res.group_labels     # (3, n_frames), ['B1', 'B2', 'B3']
+sasa.ungrouped                       # positions in the AtomGroup of the atoms in no group
+```
+
+A group is a selection string, an AtomGroup or atom positions in the AtomGroup. With `keep_atoms`,
+`res.group([...])` gives the same from the stored SASA of every atom, and `sassy.group_weights`
+gives the weights themselves. `sasa.body_members` (or `res.body_members`) lists the atom positions of
+every body. `sassy.radii_references(ag)` returns the sources of the default radii (key, citation,
+DOI), so you can cite them.
 
 `-o x.xvg` writes the table as text. `-o x.npz` (or `sasa.save("x.npz")`) writes all
 results, with how they were computed and the table; read them with `sassy.load`:

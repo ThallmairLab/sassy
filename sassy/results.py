@@ -1,6 +1,6 @@
 """
-Results of a SASA calculation: the SASA (nm^2) of every body, of every atom and in
-total over the analysed frames, with their labels, and saving to / loading from npz.
+Results of a SASA calculation: the SASA (nm^2) of every body, of every atom, of groups of
+atoms and in total over the analysed frames, with their labels, and saving to / loading from npz.
 """
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -10,10 +10,42 @@ import numpy as np
 from numpy.typing import ArrayLike
 import MDAnalysis as mda
 
-from .groups import body_type_indices
+from .groups import Share, body_type_indices, group_weights, members
 from .statistics import resolve_statistic
 
 COLUMNS = ('bodies', 'total', 'types', 'atoms') # the levels of Results.table
+
+
+def atom_positions(ag: mda.AtomGroup | None, selection: str | mda.AtomGroup | ArrayLike) -> np.ndarray:
+	"""
+	Positions in ``ag`` of a selection string (applied to ``ag``), of an AtomGroup (or Atom,
+	Residue, ...) whose atoms are all in ``ag``, or atom positions given as integers.
+	"""
+	if isinstance(selection, str) or hasattr(selection, 'atoms') or isinstance(selection, mda.core.groups.Atom):
+		if ag is None:
+			raise ValueError("Selecting by a selection string or AtomGroup needs the atoms: give the "
+			                 "universe to load(), or select by atom indices.")
+		if isinstance(selection, str):
+			selection = ag.select_atoms(selection)
+		elif isinstance(selection, mda.core.groups.Atom):
+			selection = selection.universe.atoms[[selection.index]]
+		else: # AtomGroup, Residue(Group), Segment(Group)
+			selection = selection.atoms
+		if selection.universe is not ag.universe:
+			raise ValueError("The selection belongs to a different Universe than the atoms of the SASA.")
+		lookup = np.full(ag.universe.atoms.n_atoms, -1, dtype=np.int64)
+		lookup[ag.indices] = np.arange(ag.n_atoms)
+		indices = lookup[selection.indices]
+		if (indices < 0).any():
+			missing = selection.indices[indices < 0]
+			raise ValueError(f"{len(missing)} atom(s) of the selection are not in the AtomGroup of the SASA: "
+			                 f"universe indices {missing[:10].tolist()}{' ...' if len(missing) > 10 else ''}.")
+		return indices
+	indices = np.asarray(selection)
+	if not np.issubdtype(indices.dtype, np.integer):
+		raise TypeError(f"selection must be a selection string, an AtomGroup or atom indices, got "
+		                f"{type(selection).__name__}.")
+	return indices
 
 
 def body_index(labels: list[str], body: int | str) -> int:
@@ -61,6 +93,11 @@ class Results:
 	ag : MDAnalysis.AtomGroup or None
 		the atoms, for :meth:`select` by selection string or AtomGroup; None after
 		:func:`load` without a universe
+	group_sasa : np.ndarray or None
+		(n_groups, n_frames) SASA of the groups of atoms given to :class:`SASA` (``groups``),
+		computed during the run; None without groups
+	group_labels : list of str or None
+		(n_groups,) label of every group
 
 	Examples
 	--------
@@ -70,6 +107,8 @@ class Results:
 	>>> res.body('GSH2')               # (n_frames,)
 	>>> res.type_sasa()                # {'GSH': (n_frames,), ...}
 	>>> res.select('name S*')          # (n_frames,) summed over the selected atoms
+	>>> res.group([[0, 1], [1, 2]])    # (2, n_frames) groups sharing atom 1 (half each)
+	>>> res.group_sasa                 # (n_groups, n_frames) of SASA(..., groups=...)
 	>>> res.table(['bodies', 'total']) # labels and (n_columns, n_frames) values
 	>>> res.representative('GSH')      # (body, frame, median SASA) of a median GSH
 	"""
@@ -82,6 +121,8 @@ class Results:
 	atom_labels: list[str] | None = None
 	atom_body: np.ndarray | None = None
 	ag: mda.AtomGroup | None = field(default=None, compare=False)
+	group_sasa: np.ndarray | None = None
+	group_labels: list[str] | None = None
 
 	def __post_init__(self) -> None:
 		self.times = np.asarray(self.times, dtype=float)
@@ -94,12 +135,18 @@ class Results:
 			self.atom_labels = list(self.atom_labels)
 		if self.atom_body is not None:
 			self.atom_body = np.asarray(self.atom_body, dtype=int)
+		if (self.group_sasa is None) != (self.group_labels is None):
+			raise ValueError("group_sasa and group_labels must be given together.")
+		if self.group_labels is not None:
+			self.group_labels = list(self.group_labels)
+			self.group_sasa = np.asarray(self.group_sasa, dtype=float).reshape(len(self.group_labels), len(self.frames))
 
 	def __repr__(self) -> str:
 		types = ', '.join(f"{name} x{len(indices)}" for name, indices in self.body_type_indices.items())
 		atoms = f"{len(self.atom_sasa)} atoms" if self.atom_sasa is not None else "no atoms kept"
 		bodies = 'body' if self.n_bodies == 1 else 'bodies'
-		return f"<Results: {self.n_bodies} {bodies} ({types}), {self.n_frames} frames, {atoms}>"
+		groups = f", {len(self.group_labels)} groups" if self.group_labels is not None else ""
+		return f"<Results: {self.n_bodies} {bodies} ({types}), {self.n_frames} frames, {atoms}{groups}>"
 
 	@property
 	def n_bodies(self) -> int:
@@ -118,6 +165,13 @@ class Results:
 	def body_type_indices(self) -> dict[str, np.ndarray]:
 		"""Body indices of every type, in the order of first appearance: {type: indices}."""
 		return body_type_indices(self.body_type_labels)
+
+	@property
+	def body_members(self) -> list[np.ndarray]:
+		"""(n_bodies,) positions in the atoms (rows of :attr:`atom_sasa`) of the atoms of every body."""
+		if self.atom_body is None:
+			raise RuntimeError("The body of every atom is not known (no atom_body).")
+		return members(self.atom_body, self.n_bodies)
 
 	# bodies
 	def body_index(self, body: int | str) -> int:
@@ -201,31 +255,7 @@ class Results:
 	# atoms
 	def _atom_indices(self, selection: str | mda.AtomGroup | ArrayLike) -> np.ndarray:
 		"""Indices in the atoms of a selection string (applied to ``ag``), an AtomGroup or indices."""
-		if isinstance(selection, str) or hasattr(selection, 'atoms') or isinstance(selection, mda.core.groups.Atom):
-			if self.ag is None:
-				raise ValueError("Selecting by a selection string or AtomGroup needs the atoms: give the "
-				                 "universe to load(), or select by atom indices.")
-			if isinstance(selection, str):
-				selection = self.ag.select_atoms(selection)
-			elif isinstance(selection, mda.core.groups.Atom):
-				selection = selection.universe.atoms[[selection.index]]
-			else: # AtomGroup, Residue(Group), Segment(Group)
-				selection = selection.atoms
-			if selection.universe is not self.ag.universe:
-				raise ValueError("The selection belongs to a different Universe than the atoms of the SASA.")
-			lookup = np.full(self.ag.universe.atoms.n_atoms, -1, dtype=np.int64)
-			lookup[self.ag.indices] = np.arange(self.ag.n_atoms)
-			indices = lookup[selection.indices]
-			if (indices < 0).any():
-				missing = selection.indices[indices < 0]
-				raise ValueError(f"{len(missing)} atom(s) of the selection are not in the AtomGroup of the SASA: "
-				                 f"universe indices {missing[:10].tolist()}{' ...' if len(missing) > 10 else ''}.")
-			return indices
-		indices = np.asarray(selection)
-		if not np.issubdtype(indices.dtype, np.integer):
-			raise TypeError(f"selection must be a selection string, an AtomGroup or atom indices, got "
-			                f"{type(selection).__name__}.")
-		return indices
+		return atom_positions(self.ag, selection)
 
 	def select(self, selection: str | mda.AtomGroup | ArrayLike, per_atom: bool = False) -> np.ndarray:
 		"""
@@ -247,6 +277,29 @@ class Results:
 			                   "and the total are available.")
 		values = self.atom_sasa[self._atom_indices(selection)]
 		return values if per_atom else values.sum(axis=0)
+
+	def group(self, groups: Sequence[str | mda.AtomGroup | ArrayLike], share: Share = 'equal') -> np.ndarray:
+		"""
+		SASA of groups of atoms, (n_groups, n_frames), e.g. of the beads of a coarse-grained
+		mapping, from the SASA of every atom (``keep_atoms``). Groups may share atoms: with
+		``share='equal'`` an atom in k groups gives 1/k of its SASA to each, with ``'full'``
+		all of it (see :func:`group_weights`).
+
+		To compute the groups during the run, without keeping the SASA of every atom, give
+		them to :class:`SASA` (``groups``) instead: :attr:`group_sasa`.
+
+		Parameters
+		----------
+		groups : sequence of str, AtomGroup or array-like of int
+			every group as a selection string, an AtomGroup or atom positions, see :meth:`select`
+		share : str
+			'equal' or 'full'
+		"""
+		if self.atom_sasa is None:
+			raise RuntimeError("The SASA of every atom was not kept (keep_atoms=False): give the groups to "
+			                   "SASA(groups=...) to compute them during the run.")
+		weights, _ = group_weights([self._atom_indices(group) for group in groups], len(self.atom_sasa), share)
+		return np.asarray(weights @ self.atom_sasa).reshape(len(groups), self.n_frames)
 
 	# tables
 	def table(self, columns: Sequence[str] = ('bodies',), groups: Sequence[str | mda.AtomGroup] = (),
@@ -297,11 +350,14 @@ class Results:
 
 def _difference(minuend: Results, subtrahend: Results) -> Results:
 	"""Element-wise ``minuend - subtrahend`` (e.g. the buried area: free minus covered)."""
-	atoms = None
+	atoms = groups = None
 	if minuend.atom_sasa is not None and subtrahend.atom_sasa is not None:
 		atoms = minuend.atom_sasa - subtrahend.atom_sasa
+	if minuend.group_sasa is not None and subtrahend.group_sasa is not None:
+		groups = minuend.group_sasa - subtrahend.group_sasa
 	return Results(minuend.times, minuend.frames, minuend.body_sasa - subtrahend.body_sasa, minuend.body_labels,
-	               minuend.body_type_labels, atoms, minuend.atom_labels, minuend.atom_body, minuend.ag)
+	               minuend.body_type_labels, atoms, minuend.atom_labels, minuend.atom_body, minuend.ag,
+	               groups, minuend.group_labels if groups is not None else None)
 
 
 @dataclass(repr=False)
@@ -334,7 +390,8 @@ def save(fname: str | Path, results: Results, free: Results | None = None, meta:
 
 	Keys: ``times``, ``frames``, ``body_labels``, ``body_type_labels``, ``body_sasa`` (n_bodies,
 	n_frames), ``total_sasa``, ``atom_body`` (body of every atom); with the per-atom SASA
-	``atom_sasa``, ``atom_labels`` and ``atom_indices`` (universe indices); with ``free`` the same
+	``atom_sasa``, ``atom_labels`` and ``atom_indices`` (universe indices); with groups ``group_sasa``
+	and ``group_labels``; with ``free`` the same
 	arrays prefixed ``free_``; ``meta`` (JSON); with a ``table`` (labels, values) ``columns`` and
 	``column_labels``.
 	"""
@@ -347,10 +404,14 @@ def save(fname: str | Path, results: Results, free: Results | None = None, meta:
 		arrays[f'{prefix}total_sasa'] = item.total_sasa
 		if item.atom_sasa is not None:
 			arrays[f'{prefix}atom_sasa'] = item.atom_sasa
+		if item.group_sasa is not None:
+			arrays[f'{prefix}group_sasa'] = item.group_sasa
 	if results.atom_labels is not None:
 		arrays['atom_labels'] = np.array(results.atom_labels, dtype=str)
 	if results.atom_body is not None:
 		arrays['atom_body'] = results.atom_body
+	if results.group_labels is not None:
+		arrays['group_labels'] = np.array(results.group_labels, dtype=str)
 	if results.ag is not None:
 		arrays['atom_indices'] = results.ag.indices
 	if table is not None:
@@ -387,11 +448,13 @@ def load(fname: str | Path, universe: mda.Universe | None = None) -> Saved:
 			raise ValueError(f"The universe has {universe.atoms.n_atoms} atoms, too few for the saved atoms.")
 		ag = universe.atoms[indices]
 	atom_labels = data['atom_labels'].tolist() if 'atom_labels' in data else None
+	group_labels = data['group_labels'].tolist() if 'group_labels' in data else None
 
 	def results(prefix: str) -> Results:
 		return Results(data['times'], data['frames'], data[f'{prefix}body_sasa'], data['body_labels'].tolist(),
 		               data['body_type_labels'].tolist(), data.get(f'{prefix}atom_sasa'), atom_labels,
-		               data.get('atom_body'), ag)
+		               data.get('atom_body'), ag, data.get(f'{prefix}group_sasa'),
+		               group_labels if f'{prefix}group_sasa' in data else None)
 
 	main = results('')
 	free = results('free_') if 'free_body_sasa' in data else None

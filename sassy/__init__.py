@@ -25,9 +25,10 @@ atomistic systems, a bead in coarse-grained ones.
 from .dots import unit_dots
 from .engine import surface_dots, warn_coincident
 from .environment import environment_copies
-from .groups import (BODIES, atom_label, molecule_index, molecule_types, numbered_labels, partition,
+from .groups import (BODIES, SHARES, atom_label, group_weights, molecule_index, molecule_types, numbered_labels, partition,
                      residue_index, residue_labels, residue_types)
-from .radii import AA_RADII, CG_RADII, PROBE_RADIUS, atom_radii, atom_symbols, radii_remarks, resolve_radii
+from .radii import (AA_RADII, CG_RADII, PROBE_RADIUS, Reference, atom_radii, atom_symbols, radii_references,
+                    radii_remarks, resolve_radii)
 from .results import COLUMNS, Results, Saved, load
 from .sasa import N_DOTS, SASA
 from .units import to_angstrom, to_nm
@@ -41,11 +42,11 @@ except importlib.metadata.PackageNotFoundError: # run from the source tree witho
 	__version__ = "0+unknown"
 
 __all__ = [
-	"SASA", "N_DOTS", "BODIES", "partition", "Results", "Saved", "load", "COLUMNS", "surface_dots", "warn_coincident", "environment_copies",
+	"SASA", "N_DOTS", "BODIES", "partition", "SHARES", "group_weights", "Results", "Saved", "load", "COLUMNS", "surface_dots", "warn_coincident", "environment_copies",
 	"to_nm", "to_angstrom",
 	"Surface", "SURFACE_DOTS", "STATISTICS", "best_matching_frame", "closest_to", "generate_surface",
 	"unit_dots",
 	"atom_label", "molecule_index", "molecule_types", "numbered_labels",
 	"residue_index", "residue_labels", "residue_types",
-	"AA_RADII", "CG_RADII", "PROBE_RADIUS", "atom_radii", "atom_symbols", "radii_remarks", "resolve_radii",
+	"AA_RADII", "CG_RADII", "PROBE_RADIUS", "atom_radii", "atom_symbols", "radii_references", "radii_remarks", "Reference", "resolve_radii",
 ]

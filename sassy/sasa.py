@@ -1,8 +1,8 @@
 """
-SASA of every body (molecule, residue, or the whole selection) and of every atom of an
-MDAnalysis AtomGroup over a trajectory, optionally covered by an environment.
+SASA of every body (molecule, residue, or the whole selection), of every atom and of groups
+of atoms of an MDAnalysis AtomGroup over a trajectory, optionally covered by an environment.
 """
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 import logging
 from pathlib import Path
 import time
@@ -14,9 +14,9 @@ from MDAnalysis.lib.log import ProgressBar
 from .dots import unit_dots
 from .engine import _exposed_counts, warn_coincident
 from .environment import Copies, box_nm, environment_copies
-from .groups import BODIES, Bodies, atom_label, body_type_indices, members, partition
+from .groups import BODIES, Bodies, Share, atom_label, body_type_indices, group_weights, members, partition
 from .radii import PROBE_RADIUS, atom_radii, radii_remarks, resolve_radii
-from .results import Results, _difference, body_index, save
+from .results import Results, _difference, atom_positions, body_index, save
 from .statistics import resolve_statistic
 from .surface import SURFACE_DOTS, Surface, body_remark, chosen_remark, generate_surface
 from .units import to_nm
@@ -77,9 +77,20 @@ class SASA:
 		keep the SASA of every atom of every frame (``results.atom_sasa``, (n_atoms, n_frames)),
 		needed for :meth:`Results.select`. The SASA of every body is always kept; False
 		saves the memory of the per-atom array for very large systems or long trajectories
+		(``groups`` are still computed, during the run)
 	buried : bool
 		also compute the SASA without the environment (:attr:`free`), and so the area the
 		environment buries (:attr:`buried`); needs an ``environment``
+	groups : sequence or dict, optional
+		groups of atoms whose SASA is summed during the run (``results.group_sasa``, (n_groups,
+		n_frames)), e.g. the beads of a coarse-grained mapping or functional groups; works with
+		``keep_atoms=False``. Every group is a selection string (applied to ``ag``), an
+		AtomGroup within ``ag`` or indices in ``ag``; as a dict {label: group}, else labelled
+		by its selection string or ``group<k>``. Groups may share atoms and span bodies; the
+		SASA of every atom is still that within its own body
+	share : str
+		how the SASA of an atom in several groups is split: 'equal' (default, 1/k to each of
+		its k groups, so the groups add up) or 'full' (all of it to each), see :func:`group_weights`
 
 	Examples
 	--------
@@ -88,6 +99,8 @@ class SASA:
 	>>> res.body_sasa, res.body_labels  # (n_bodies, n_frames) nm^2, ['GSH1', 'GSH2', ...]
 	>>> res.total_sasa                  # (n_frames,)
 	>>> res.select('name S*')           # (n_frames,) SASA of the sulfur atoms
+	>>> beads = SASA(ag, groups={'B1': 'name C1 C2', 'B2': 'name C2 C3'}, keep_atoms=False)
+	>>> beads.run().group_sasa          # (2, n_frames), C2 split equally between B1 and B2
 	>>> sasa.surface('GSH1').write('dots.pdb')  # structure + surface dots of a median-SASA frame
 	>>> ligand = SASA(universe.select_atoms('resname LIG'), environment='protein', buried=True)
 	>>> ligand.run().total_sasa         # SASA of the ligand left uncovered by the protein
@@ -121,13 +134,21 @@ class SASA:
 	free, buried : Results or None
 		of the last :meth:`run` with ``buried``: the SASA without the environment, and the
 		area the environment buries (free minus results); None otherwise
+	body_members : list of np.ndarray
+		(n_bodies,) positions in ``ag`` of the atoms of every body
+	group_labels : list of str or None
+		(n_groups,) label of every group, None without ``groups``
+	ungrouped : np.ndarray or None
+		positions in ``ag`` of the atoms in no group, None without ``groups``
 	"""
 
 	# --- setup
 	def __init__(self, ag: mda.AtomGroup, cg: bool = False, probe: float = PROBE_RADIUS, ndots: int = N_DOTS,
 	             radii: ArrayLike | Mapping[str, float] | None = None, max_frame_atoms: int = 20000,
 	             bodies: Bodies = 'molecule', environment: str | mda.AtomGroup | None = None,
-	             keep_atoms: bool = True, buried: bool = False) -> None:
+	             keep_atoms: bool = True, buried: bool = False,
+	             groups: Sequence[str | mda.AtomGroup | ArrayLike] | Mapping[str, str | mda.AtomGroup | ArrayLike] | None = None,
+	             share: Share = 'equal') -> None:
 		if bodies not in BODIES:
 			raise ValueError(f"bodies must be one of {', '.join(BODIES)}, got {bodies!r}.")
 		if not probe >= 0:
@@ -140,6 +161,7 @@ class SASA:
 		self.radii, radii_table = resolve_radii(ag, radii, cg)
 		self.dots = unit_dots(int(ndots))
 		self._prepare_bodies()
+		self._set_groups(groups, share)
 		self.environment = None
 		if environment is not None:
 			self._set_environment(environment, radii_table)
@@ -169,6 +191,26 @@ class SASA:
 		self._body_anchor = np.zeros(self.n_bodies, dtype=int) # (n_bodies,) position in the active atoms
 		self._body_anchor[self._active_body[first]] = first
 		self._active_anchor = self._body_anchor[self._active_body]
+
+	def _set_groups(self, groups, share: Share) -> None:
+		"""The labels of the groups, the atoms in none, and the weights of the active atoms in them."""
+		self.group_labels = self.ungrouped = self._group_weights = None
+		if groups is None:
+			return
+		if isinstance(groups, str) or hasattr(groups, 'atoms'):
+			raise TypeError("groups must be a sequence or dict of groups (each a selection string, an AtomGroup "
+			                "or atom positions), not a single group: e.g. groups=[selection].")
+		if isinstance(groups, Mapping):
+			labels, selections = [str(label) for label in groups], list(groups.values())
+		else:
+			selections = list(groups)
+			labels = [group if isinstance(group, str) else f"group{k + 1}" for k, group in enumerate(selections)]
+		weights, self.ungrouped = group_weights([atom_positions(self.ag, group) for group in selections],
+		                                        self.ag.n_atoms, share)
+		self.group_labels = labels
+		self._group_weights = weights[:, self._active].tocsr() # only atoms with a radius have a SASA
+		logger.debug("%d group(s) of atoms (share %s); %d atom(s) in no group", len(labels), share,
+		             len(self.ungrouped))
 
 	def _set_environment(self, environment: str | mda.AtomGroup, radii_table: Mapping[str, float] | None) -> None:
 		"""Check the environment and keep its atoms with a radius, their expanded radii and the cutoff."""
@@ -211,6 +253,11 @@ class SASA:
 	def body_type_indices(self) -> dict[str, np.ndarray]:
 		"""Body indices of every type, in the order of first appearance: {type: indices}."""
 		return body_type_indices(self.body_type_labels)
+
+	@property
+	def body_members(self) -> list[np.ndarray]:
+		"""(n_bodies,) positions in ``ag`` of the atoms of every body."""
+		return [atoms.copy() for atoms in self._members]
 
 	def __str__(self) -> str:
 		"""The bodies in words, e.g. '3 molecule(s)', '12 residue(s)' or 'the whole selection as one body'."""
@@ -358,26 +405,37 @@ class SASA:
 			coincident = (len(np.unique(pairs[:, 0] // n_atoms)), indices)
 		return exposed[:n_target].reshape(n_frames, n_atoms) * self._dot_area, coincident
 
-	def _new_arrays(self, n_frames: int) -> tuple[np.ndarray, np.ndarray | None]:
-		"""Empty (body SASA (n_bodies, n_frames), atom SASA (n_atoms, n_frames) or None) of a run."""
+	def _new_arrays(self, n_frames: int) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None]:
+		"""
+		Empty (body SASA (n_bodies, n_frames), atom SASA (n_atoms, n_frames) or None, group SASA
+		(n_groups, n_frames) or None) of a run.
+		"""
 		atoms = np.zeros((self.ag.n_atoms, n_frames)) if self.keep_atoms else None
-		return np.zeros((self.n_bodies, n_frames)), atoms
+		groups = np.zeros((len(self.group_labels), n_frames)) if self.group_labels is not None else None
+		return np.zeros((self.n_bodies, n_frames)), atoms, groups
 
-	def _store(self, arrays: tuple[np.ndarray, np.ndarray | None], areas: np.ndarray, block: slice) -> None:
-		"""Store the (n_frames, n_active) SASA of a block of frames: summed per body, and per atom if kept."""
-		bodies, atoms = arrays
+	def _store(self, arrays: tuple[np.ndarray, np.ndarray | None, np.ndarray | None], areas: np.ndarray,
+	           block: slice) -> None:
+		"""
+		Store the (n_frames, n_active) SASA of a block of frames: summed per body, per atom if
+		kept, and summed per group if any.
+		"""
+		bodies, atoms, groups = arrays
 		n_frames = len(areas)
 		index = (np.arange(n_frames)[:, None] * self.n_bodies + self._active_body[None]).ravel()
 		bodies[:, block] = np.bincount(index, weights=areas.ravel(),
 		                               minlength=n_frames * self.n_bodies).reshape(n_frames, -1).T
 		if atoms is not None:
 			atoms[self._active, block] = areas.T
+		if groups is not None:
+			groups[:, block] = self._group_weights @ areas.T
 
-	def _to_results(self, arrays: tuple[np.ndarray, np.ndarray | None], times: list, frames: np.ndarray) -> Results:
-		bodies, atoms = arrays
+	def _to_results(self, arrays: tuple[np.ndarray, np.ndarray | None, np.ndarray | None], times: list,
+	                frames: np.ndarray) -> Results:
+		bodies, atoms, groups = arrays
 		return Results(times, frames, bodies, self.body_labels, self.body_type_labels, atoms,
 		               [atom_label(atom) for atom in self.ag] if atoms is not None else None,
-		               atom_body=self._body_of_atom, ag=self.ag)
+		               atom_body=self._body_of_atom, ag=self.ag, group_sasa=groups, group_labels=self.group_labels)
 
 	# --- results
 	def _require_results(self) -> Results:
