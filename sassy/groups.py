@@ -1,13 +1,75 @@
 """
 Bodies of an AtomGroup: the sets of atoms that bury each other (molecules, residues or the
-whole selection), their types and labels; and atom labels.
+whole selection), their types and labels; atom labels; and groups of atoms whose SASA is
+summed (e.g. the beads of a coarse-grained mapping), which may share atoms.
 """
+from collections.abc import Sequence
 import logging
 from typing import Literal
 import numpy as np
+from numpy.typing import ArrayLike
+from scipy import sparse
 import MDAnalysis as mda
 
 logger = logging.getLogger(__name__)
+
+# Groups
+SHARES = ('equal', 'full') # how the SASA of an atom in several groups is split, see group_weights
+Share = Literal['equal', 'full']
+
+def group_weights(groups: Sequence[ArrayLike], n_atoms: int,
+                  share: Share = 'equal') -> tuple[sparse.csr_matrix, np.ndarray]:
+	'''
+	Weights of the atoms in groups of atoms: the SASA of the groups is ``weights @ atom_sasa``.
+
+	Groups may share atoms (e.g. the beads of a coarse-grained mapping). With ``share='equal'``
+	an atom in k groups gives 1/k of its SASA to each of them, so the groups add up to the SASA
+	of the atoms in any group; with ``share='full'`` it gives all of its SASA to each of them.
+	An atom listed twice in one group counts once.
+
+	Parameters
+	----------
+	groups : sequence of array-like of int
+		positions (0 to n_atoms - 1) of the atoms of every group; a group may be empty
+	n_atoms : int
+		number of atoms
+	share : str
+		'equal' or 'full', see above
+
+	Returns
+	-------
+	weights : scipy.sparse.csr_matrix
+		(n_groups, n_atoms) weight of every atom in every group
+	unassigned : np.ndarray
+		positions of the atoms that are in no group
+
+	Examples
+	--------
+	>>> weights, unassigned = group_weights([[0, 1], [1, 2]], 4)
+	>>> weights.toarray()   # atom 1 is shared: half to each group
+	array([[1. , 0.5, 0. , 0. ],
+	       [0. , 0.5, 1. , 0. ]])
+	>>> unassigned
+	array([3])
+	'''
+	if share not in SHARES:
+		raise ValueError(f"share must be one of {', '.join(SHARES)}, got {share!r}.")
+	atoms = []
+	for k, group in enumerate(groups):
+		group = np.asarray(group)
+		if group.size and not np.issubdtype(group.dtype, np.integer):
+			raise TypeError(f"Group {k} must contain atom positions (integers), got {group.dtype}.")
+		group = np.unique(group.astype(np.int64).ravel()) # an atom counts once per group
+		if len(group) and (group[0] < 0 or group[-1] >= n_atoms):
+			raise IndexError(f"Group {k} has atom positions outside 0 to {n_atoms - 1}: "
+			                 f"{group[(group < 0) | (group >= n_atoms)][:10].tolist()}.")
+		atoms.append(group)
+	rows = np.repeat(np.arange(len(atoms)), [len(group) for group in atoms])
+	columns = np.concatenate(atoms) if atoms else np.zeros(0, dtype=np.int64)
+	count = np.bincount(columns, minlength=n_atoms) # number of groups of every atom
+	data = 1.0 / count[columns] if share == 'equal' else np.ones(len(columns))
+	weights = sparse.csr_matrix((data, (rows, columns)), shape=(len(atoms), n_atoms))
+	return weights, np.flatnonzero(count == 0)
 
 # Bodies
 BODIES = ('molecule', 'residue', 'selection') # how an AtomGroup is split into bodies, see partition
