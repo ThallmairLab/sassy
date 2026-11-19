@@ -109,7 +109,8 @@ res.group_sasa, res.group_labels     # (3, n_frames), ['B1', 'B2', 'B3']
 sasa.ungrouped                       # positions in the AtomGroup of the atoms in no group
 ```
 
-A group is a selection string, an AtomGroup or atom positions in the AtomGroup. With `keep_atoms`,
+A group is a selection string, an AtomGroup or atom positions in the AtomGroup. Groups that depend on
+the bodies or radii can be set after construction, before the run: `sasa.set_groups(groups)`. With `keep_atoms`,
 `res.group([...])` gives the same from the stored SASA of every atom, and `sassy.group_weights`
 gives the weights themselves. `sasa.body_members` (or `res.body_members`) lists the atom positions of
 every body. `sassy.radii_references(ag)` returns the sources of the default radii (key, citation,
