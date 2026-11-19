@@ -9,6 +9,7 @@ tiny bead.
 """
 from collections.abc import Mapping
 import logging
+from typing import NamedTuple
 import numpy as np
 from numpy.typing import ArrayLike
 import MDAnalysis as mda
@@ -82,6 +83,29 @@ def atom_symbols(ag: mda.AtomGroup, cg: bool = False) -> list[str]:
 	symbol = {name: _symbol(guess(name) or name[:1]) for name in set(names)}
 	return [symbol[name] for name in names]
 
+class Reference(NamedTuple):
+	"""A source of radii: a stable key, what it is used for, the short citation and its DOI."""
+	key: str
+	scope: str
+	citation: str
+	doi: str
+
+
+ROWLAND_TAYLOR = Reference('rowland_taylor_1996', 'Atomistic vdW radii', 'Rowland & Taylor (1996)', '10.1021/jp953141+')
+BONDI = Reference('bondi_1964', 'Phosphorus radius', 'Bondi (1964)', '10.1021/j100785a001')
+
+
+def radii_references(ag: mda.AtomGroup, cg: bool = False) -> list[Reference]:
+	'''
+	The sources of the default radii of ``ag``, e.g. to cite them: for atomistic radii Rowland &
+	Taylor (1996), and Bondi (1964) if ``ag`` has phosphorus; none for the Martini CG radii.
+	Use the ``key`` to look a reference up in your own bibliography.
+	'''
+	if cg:
+		return []
+	return [ROWLAND_TAYLOR] + ([BONDI] if 'P' in atom_symbols(ag) else [])
+
+
 def radii_remarks(ag: mda.AtomGroup, cg: bool = False, custom: bool = False,
                   probe: float = PROBE_RADIUS) -> list[str]:
 	'''
@@ -92,10 +116,7 @@ def radii_remarks(ag: mda.AtomGroup, cg: bool = False, custom: bool = False,
 	if cg:
 		remarks.append(f"Martini CG radii: bead sizes tiny {CG_RADII['T']}, small {CG_RADII['S']}, "
 		               f"regular {CG_RADII['R']} nm")
-	else:
-		remarks.append("Atomistic vdW radii: Rowland & Taylor (1996), doi:10.1021/jp953141+")
-		if 'P' in atom_symbols(ag):
-			remarks.append("Phosphorus radius: Bondi (1964), doi:10.1021/j100785a001")
+	remarks += [f"{ref.scope}: {ref.citation}, doi:{ref.doi}" for ref in radii_references(ag, cg)]
 	remarks.append(f"Probe radius {probe} nm")
 	return remarks
 
