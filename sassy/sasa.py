@@ -161,7 +161,7 @@ class SASA:
 		self.radii, radii_table = resolve_radii(ag, radii, cg)
 		self.dots = unit_dots(int(ndots))
 		self._prepare_bodies()
-		self._set_groups(groups, share)
+		self.set_groups(groups, share)
 		self.environment = None
 		if environment is not None:
 			self._set_environment(environment, radii_table)
@@ -192,8 +192,13 @@ class SASA:
 		self._body_anchor[self._active_body[first]] = first
 		self._active_anchor = self._body_anchor[self._active_body]
 
-	def _set_groups(self, groups, share: Share) -> None:
-		"""The labels of the groups, the atoms in none, and the weights of the active atoms in them."""
+	def set_groups(self, groups: Sequence[str | mda.AtomGroup | ArrayLike] | Mapping[str, str | mda.AtomGroup | ArrayLike] | None,
+	               share: Share = 'equal') -> None:
+		"""
+		Set (or with None remove) the groups of atoms whose SASA is summed during the next
+		:meth:`run`, as ``groups`` and ``share`` of :class:`SASA`; e.g. groups that depend on
+		the bodies (see :attr:`body_members`), or on the radii (see :attr:`radii`).
+		"""
 		self.group_labels = self.ungrouped = self._group_weights = None
 		if groups is None:
 			return

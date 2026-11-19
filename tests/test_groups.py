@@ -90,6 +90,17 @@ def test_group_labels_and_kinds(three):
         SASA(three.select_atoms('resid 1'), groups=[ag.select_atoms('resid 2')])
 
 
+def test_set_groups(three):
+    """Groups set after construction, e.g. from the bodies, are computed by the next run; None removes them."""
+    sasa = SASA(three.atoms, ndots=120, keep_atoms=False)
+    sasa.set_groups([members[:10] for members in sasa.body_members], share='full')
+    res = sasa.run(stop=2)
+    assert res.group_labels == ['group1', 'group2', 'group3'] and res.group_sasa.shape == (3, 2)
+    assert len(sasa.ungrouped) == 108 - 30
+    sasa.set_groups(None)
+    assert sasa.run(stop=2).group_sasa is None and sasa.ungrouped is None
+
+
 def test_group_needs_atoms(three):
     res = SASA(three.atoms, ndots=120, keep_atoms=False).run(stop=1)
     with pytest.raises(RuntimeError, match='groups=...'):
